@@ -111,12 +111,24 @@ setImmediate(async () => {
         return secretCache.get(secretName);
       }
 
-      const name = `projects/${process.env.GCP_PROJECT_ID}/secrets/${secretName}/versions/latest`;
-      const [version] = await secretClient.accessSecretVersion({ name });
-      const secretValue = version.payload.data.toString('utf8');
-      secretCache.set(secretName, secretValue);
-      
-      return secretValue;
+      try {
+        // First try to read from mounted secret if available
+        if (secretName === 'gallabox-token' && process.env.GALLABOX_TOKEN) {
+          secretCache.set(secretName, process.env.GALLABOX_TOKEN);
+          return process.env.GALLABOX_TOKEN;
+        }
+        
+        // Otherwise use Secret Manager
+        const name = `projects/${process.env.GCP_PROJECT_ID}/secrets/${secretName}/versions/latest`;
+        const [version] = await secretClient.accessSecretVersion({ name });
+        const secretValue = version.payload.data.toString('utf8');
+        secretCache.set(secretName, secretValue);
+        
+        return secretValue;
+      } catch (err) {
+        console.error(`Error retrieving secret ${secretName}:`, err);
+        throw err;
+      }
     }
 
     // Security middleware
