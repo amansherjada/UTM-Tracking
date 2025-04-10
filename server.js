@@ -7,7 +7,7 @@ const fs = require('fs/promises');
 const secretClient = new SecretManagerServiceClient();
 
 const app = express();
-const PORT = process.env.PORT || 8080; // Fallback for local development
+const PORT = process.env.PORT
 
 // Immediate server startup with minimal configuration
 const server = app.listen(PORT, '0.0.0.0', () => {
