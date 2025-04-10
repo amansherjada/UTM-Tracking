@@ -1,0 +1,10 @@
+
+runtime: nodejs
+env: flex
+
+service: utm-whatsapp-tracker
+
+env_variables:
+  NODE_ENV: "production"
+  PORT: "8080"
+  GCP_PROJECT_ID: "utm-whatsapp-tracker"
