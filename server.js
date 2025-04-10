@@ -3,18 +3,19 @@ const cors = require('cors');
 const helmet = require('helmet');
 const admin = require('firebase-admin');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+const fs = require('fs/promises');
 const secretClient = new SecretManagerServiceClient();
 
 const app = express();
-const PORT = process.env.PORT;
+const PORT = process.env.PORT || 8080; // Fallback for local development
 
-// Immediate server startup
+// Immediate server startup with minimal configuration
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on port ${PORT}`);
-  console.log('Basic endpoints available: /health');
+  console.log('Immediate endpoints available: /health');
 });
 
-// Global error handlers
+// Global error handling
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', reason);
 });
@@ -28,26 +29,27 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-// Essential middleware
+// Essential middleware (non-blocking)
 app.use(cors());
 app.use(helmet());
 app.use(express.json());
 
-// Health endpoint (immediately available)
+// Immediate health endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
+  res.status(200).json({
     status: 'healthy',
     timestamp: new Date().toISOString()
   });
 });
 
-// Async initialization wrapper
-(async () => {
+// Deferred heavy initialization
+setImmediate(async () => {
   try {
     console.log('Starting async initialization...');
-    
-    // Load service account
-    const serviceAccount = require(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+
+    // Load service account asynchronously
+    const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    const serviceAccount = JSON.parse(await fs.readFile(credsPath));
     
     // Initialize Firebase
     admin.initializeApp({
@@ -55,27 +57,26 @@ app.get('/health', (req, res) => {
       databaseURL: `https://${process.env.GCP_PROJECT_ID}.firebaseio.com`
     });
 
-    // Configure Firestore
+    // Configure Firestore with timeout
     const db = admin.firestore();
     db.settings({
       databaseId: 'utm-tracker-db',
       timeout: 10000
     });
 
-    // Non-blocking Firestore connection check
+    // Non-blocking connection check
     db.listCollections()
       .then(() => console.log('Firestore connection verified'))
       .catch(err => console.error('Firestore connection warning:', err));
 
-    // Initialize collections
     const clicksCollection = db.collection('utmClicks');
 
-    // Add readiness check endpoint
+    // Readiness endpoint
     app.get('/readiness', async (req, res) => {
       try {
         await Promise.race([
           db.listCollections(),
-          new Promise((_, reject) => 
+          new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Connection timeout')), 15000)
           )
         ]);
@@ -86,14 +87,14 @@ app.get('/health', (req, res) => {
       }
     });
 
-    // Helper function for secrets
+    // Secret manager helper
     async function getSecret(secretName) {
       const name = `projects/${process.env.GCP_PROJECT_ID}/secrets/${secretName}/versions/latest`;
       const [version] = await secretClient.accessSecretVersion({ name });
       return version.payload.data.toString('utf8');
     }
 
-    // Gallabox verification middleware
+    // Security middleware
     const verifyGallabox = async (req, res, next) => {
       try {
         const token = req.headers['x-gallabox-token'];
@@ -109,7 +110,7 @@ app.get('/health', (req, res) => {
       }
     };
 
-    // Store UTM click endpoint
+    // Data endpoints
     app.post('/store-click', async (req, res) => {
       try {
         const { session_id, ...utmData } = req.body;
@@ -129,7 +130,7 @@ app.get('/health', (req, res) => {
       }
     });
 
-    // Webhook handler
+    // Webhook endpoint
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
         const event = req.body;
@@ -165,13 +166,13 @@ app.get('/health', (req, res) => {
       }
     });
 
-    // Initialize background services
+    // Background services
     const { scheduledSync } = await import('./google-sheets-sync.js');
     await scheduledSync();
     console.log('Background services initialized');
 
     console.log('Async initialization completed');
-    console.log('Available endpoints:');
+    console.log('All endpoints available:');
     console.log(`- http://0.0.0.0:${PORT}/readiness`);
     console.log(`- http://0.0.0.0:${PORT}/store-click`);
     console.log(`- http://0.0.0.0:${PORT}/gallabox-webhook`);
@@ -179,6 +180,6 @@ app.get('/health', (req, res) => {
   } catch (err) {
     console.error('Async initialization error:', err);
   }
-})();
+});
 
 module.exports = app;
