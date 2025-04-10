@@ -14,8 +14,7 @@ USER node
 # Copy application files
 COPY --chown=node:node . .
 
-# Environment configuration
-ENV NODE_ENV=production
+# Dynamic port exposure
 EXPOSE $PORT
 
 CMD ["node", "server.js"]
