@@ -14,7 +14,7 @@ USER node
 # Copy application files
 COPY --chown=node:node . .
 
-# Set environment variables
+# Environment configuration
 ENV NODE_ENV=production
 EXPOSE $PORT
 
