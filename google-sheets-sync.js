@@ -2,23 +2,27 @@ const { Firestore } = require('@google-cloud/firestore');
 const { GoogleAuth } = require('google-auth-library');
 const { sheets } = require('@googleapis/sheets');
 require('dotenv').config();
+const fs = require('fs');
 
 // Initialize Firestore with enhanced configuration
 const db = new Firestore({
   projectId: process.env.GCP_PROJECT_ID,
-  keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-  databaseId: 'utm-tracker-db'
+  databaseId: 'utm-tracker-db',
+  keyFilename: '/secrets/secrets'
 });
 
 // Initialize Google Sheets API client
 async function initializeSheetsClient() {
   try {
+    // Read credentials directly from the mounted file
+    const credentials = JSON.parse(fs.readFileSync('/secrets/secrets', 'utf8'));
+
     const auth = new GoogleAuth({
       scopes: [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
       ],
-      keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS
+      credentials
     });
 
     const client = await auth.getClient();
