@@ -8,7 +8,6 @@ const secretClient = new SecretManagerServiceClient();
 require('dotenv').config();
 
 const app = express();
-// const PORT = process.env.PORT;
 const PORT = process.env.PORT || 8080; // Cloud Run default port
 
 // Immediate server startup with minimal configuration
@@ -40,7 +39,7 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'healthy',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -50,9 +49,9 @@ setImmediate(async () => {
     console.log('Starting async initialization...');
 
     // Load service account asynchronously with error handling
-    const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    const credsPath = '/secrets/secrets'; // Updated to use mounted secret file path
     console.log(`Loading credentials from: ${credsPath}`);
-    
+
     const serviceAccount = JSON.parse(await fs.readFile(credsPath));
     console.log('Credentials loaded successfully');
 
@@ -60,7 +59,7 @@ setImmediate(async () => {
     console.log('Initializing Firebase...');
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
-      databaseURL: `https://${process.env.GCP_PROJECT_ID}.firebaseio.com`
+      databaseURL: `https://${process.env.GCP_PROJECT_ID}.firebaseio.com`,
     });
     console.log('Firebase initialized');
 
@@ -68,13 +67,13 @@ setImmediate(async () => {
     const db = admin.firestore();
     db.settings({
       databaseId: 'utm-tracker-db',
-      timeout: 10000
+      timeout: 10000,
     });
 
     // Non-blocking connection check with retries
     let firestoreConnected = false;
     const maxRetries = 3;
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(`Firestore connection attempt ${attempt}/${maxRetries}`);
@@ -83,7 +82,7 @@ setImmediate(async () => {
         break;
       } catch (err) {
         console.error(`Firestore connection warning (attempt ${attempt}):`, err);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
 
@@ -107,25 +106,23 @@ setImmediate(async () => {
 
     // Secret manager helper with caching
     const secretCache = new Map();
-    
+
     async function getSecret(secretName) {
       if (secretCache.has(secretName)) {
         return secretCache.get(secretName);
       }
 
       try {
-        // First try to read from mounted secret if available
         if (secretName === 'gallabox-token' && process.env.GALLABOX_TOKEN) {
           secretCache.set(secretName, process.env.GALLABOX_TOKEN);
           return process.env.GALLABOX_TOKEN;
         }
-        
-        // Otherwise use Secret Manager
+
         const name = `projects/${process.env.GCP_PROJECT_ID}/secrets/${secretName}/versions/latest`;
         const [version] = await secretClient.accessSecretVersion({ name });
         const secretValue = version.payload.data.toString('utf8');
         secretCache.set(secretName, secretValue);
-        
+
         return secretValue;
       } catch (err) {
         console.error(`Error retrieving secret ${secretName}:`, err);
@@ -142,12 +139,12 @@ setImmediate(async () => {
         }
 
         const gallaboxToken = await getSecret('gallabox-token');
-        
+
         if (token !== gallaboxToken) {
           console.warn('Invalid token received');
           return res.status(401).json({ error: 'Unauthorized' });
         }
-        
+
         next();
       } catch (error) {
         console.error('Token verification error:', error);
@@ -168,7 +165,7 @@ setImmediate(async () => {
           ...utmData,
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
           hasEngaged: false,
-          syncedToSheets: false
+          syncedToSheets: false,
         });
 
         console.log(`Click stored for session: ${session_id}`);
@@ -204,7 +201,7 @@ setImmediate(async () => {
 
         const docRef = clicksCollection.doc(sessionId);
         const doc = await docRef.get();
-        
+
         if (!doc.exists) {
           console.warn(`Session not found: ${sessionId}`);
           return res.status(404).json({ error: 'Session not found' });
@@ -214,7 +211,7 @@ setImmediate(async () => {
           hasEngaged: true,
           phoneNumber: event.sender,
           lastMessage: event.text,
-          engagedAt: admin.firestore.FieldValue.serverTimestamp()
+          engagedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
         console.log(`Webhook processed for session: ${sessionId}`);
@@ -235,7 +232,7 @@ setImmediate(async () => {
         const result = await scheduledSync();
         res.status(200).json({
           message: 'Scheduled sync executed successfully',
-          result
+          result,
         });
       } catch (err) {
         console.error('Error during scheduledSync:', err);
@@ -246,16 +243,10 @@ setImmediate(async () => {
     console.log('Background services initialized');
 
     console.log('Async initialization completed');
-    console.log('All endpoints available:');
-    console.log(`- http://0.0.0.0:${PORT}/readiness`);
-    console.log(`- http://0.0.0.0:${PORT}/store-click`);
-    console.log(`- http://0.0.0.0:${PORT}/gallabox-webhook`);
-
   } catch (err) {
     console.error('Critical initialization error:', err);
-    // Graceful shutdown on fatal errors
+    
     server.close(() => {
-      console.log('Server closed due to initialization failure');
       process.exit(1);
     });
   }
