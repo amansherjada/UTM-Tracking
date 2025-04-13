@@ -5,9 +5,11 @@ const admin = require('firebase-admin');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
 const fs = require('fs/promises');
 const secretClient = new SecretManagerServiceClient();
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT;
+// const PORT = process.env.PORT;
+const PORT = process.env.PORT || 8080; // Cloud Run default port
 
 // Immediate server startup with minimal configuration
 const server = app.listen(PORT, '0.0.0.0', () => {
@@ -226,6 +228,21 @@ setImmediate(async () => {
     // Background services
     const { scheduledSync } = await import('./google-sheets-sync.js');
     await scheduledSync();
+
+    app.post('/test-scheduled-sync', async (req, res) => {
+      try {
+        console.log('Triggering scheduledSync...');
+        const result = await scheduledSync();
+        res.status(200).json({
+          message: 'Scheduled sync executed successfully',
+          result
+        });
+      } catch (err) {
+        console.error('Error during scheduledSync:', err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     console.log('Background services initialized');
 
     console.log('Async initialization completed');
