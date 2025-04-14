@@ -112,7 +112,7 @@ setImmediate(async () => {
       }
     };
 
-    // Hybrid Webhook Handler
+    // Hybrid Webhook Handler with proper message extraction
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
         const event = req.body;
@@ -126,6 +126,10 @@ setImmediate(async () => {
           content: 'none'
         };
 
+        // Extract message content from proper nested structure
+        const messageContent = event.whatsapp?.text?.body || 'No text content';
+        const senderPhone = event.whatsapp?.from || event.sender;
+
         // Handle context from button clicks
         if (event.context) {
           try {
@@ -134,7 +138,7 @@ setImmediate(async () => {
             utmData = context;
           } catch (err) {
             console.warn('Invalid context format:', err);
-            return res.status(400).send('Invalid context format');
+            return res.status(400).json({ error: 'Invalid context format' });
           }
         } 
         // Create new session for direct messages
@@ -144,24 +148,30 @@ setImmediate(async () => {
             ...utmData,
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
             hasEngaged: true,
-            phoneNumber: event.sender,
-            lastMessage: event.text,
+            phoneNumber: senderPhone,
+            lastMessage: messageContent, // Use properly extracted message
             engagedAt: admin.firestore.FieldValue.serverTimestamp(),
             syncedToSheets: false
           });
         }
 
-        // Common update logic
+        // Common update logic with conditional fields
         const docRef = clicksCollection.doc(sessionId);
-        await docRef.update({
+        const updateData = {
           hasEngaged: true,
-          phoneNumber: event.sender,
-          lastMessage: event.text,
+          phoneNumber: senderPhone,
           engagedAt: admin.firestore.FieldValue.serverTimestamp(),
           ...utmData
-        });
+        };
 
-        console.log(`Processed ${event.context ? 'UTM-tracked' : 'direct'} message from ${event.sender}`);
+        // Only add lastMessage if content exists
+        if (messageContent && messageContent !== 'No text content') {
+          updateData.lastMessage = messageContent;
+        }
+
+        await docRef.update(updateData);
+
+        console.log(`Processed ${event.context ? 'UTM-tracked' : 'direct'} message from ${senderPhone}`);
         res.status(200).json({ 
           status: 'processed',
           sessionId,
