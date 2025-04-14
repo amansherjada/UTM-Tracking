@@ -112,11 +112,20 @@ setImmediate(async () => {
       }
     };
 
-    // Hybrid Webhook Handler with proper message extraction
+    // Enhanced Gallabox Webhook Handler
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
         const event = req.body;
         
+        // Extract message and sender safely
+        const messageContent = event.whatsapp?.text?.body || 'No text content';
+        const senderPhone = event.whatsapp?.from || event.sender;
+        
+        if (!senderPhone) {
+          console.warn('Missing phone number in webhook payload');
+          return res.status(400).json({ error: 'Missing phone number' });
+        }
+
         // Initialize tracking data
         let sessionId;
         let utmData = {
@@ -126,52 +135,85 @@ setImmediate(async () => {
           content: 'none'
         };
 
-        // Extract message content from proper nested structure
-        const messageContent = event.whatsapp?.text?.body || 'No text content';
-        const senderPhone = event.whatsapp?.from || event.sender;
-
-        // Handle context from button clicks
+        // First try to use context if available
         if (event.context) {
           try {
             const context = JSON.parse(Buffer.from(event.context, 'base64').toString());
             sessionId = context?.session_id;
             utmData = context;
+            console.log('Found context with session ID:', sessionId);
           } catch (err) {
             console.warn('Invalid context format:', err);
-            return res.status(400).json({ error: 'Invalid context format' });
           }
-        } 
-        // Create new session for direct messages
-        else {
-          sessionId = crypto.randomUUID();
-          await clicksCollection.doc(sessionId).set({
-            ...utmData,
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            hasEngaged: true,
-            phoneNumber: senderPhone,
-            lastMessage: messageContent, // Use properly extracted message
-            engagedAt: admin.firestore.FieldValue.serverTimestamp(),
-            syncedToSheets: false
-          });
         }
 
-        // Common update logic with conditional fields
-        const docRef = clicksCollection.doc(sessionId);
+        // If no valid context, search for existing records
+        if (!sessionId) {
+          console.log('No context found, searching for records with phone:', senderPhone);
+          
+          // Look for existing records with this phone
+          const existingByPhoneQuery = await clicksCollection
+            .where('phoneNumber', '==', senderPhone)
+            .orderBy('timestamp', 'desc')
+            .limit(1)
+            .get();
+          
+          if (!existingByPhoneQuery.empty) {
+            sessionId = existingByPhoneQuery.docs[0].id;
+            console.log('Found existing record by phone number:', sessionId);
+          } else {
+            // Look for recent unengaged clicks (last 30 minutes)
+            const thirtyMinutesAgo = admin.firestore.Timestamp.fromDate(
+              new Date(Date.now() - 30 * 60 * 1000)
+            );
+            
+            const recentClicksQuery = await clicksCollection
+              .where('hasEngaged', '==', false)
+              .where('timestamp', '>=', thirtyMinutesAgo)
+              .orderBy('timestamp', 'desc')
+              .limit(10)
+              .get();
+            
+            if (!recentClicksQuery.empty) {
+              sessionId = recentClicksQuery.docs[0].id;
+              utmData = recentClicksQuery.docs[0].data();
+              console.log('Found recent unengaged click:', sessionId);
+            } else {
+              sessionId = crypto.randomUUID();
+              console.log('Creating new session:', sessionId);
+            }
+          }
+        }
+
+        // Prepare update data
         const updateData = {
           hasEngaged: true,
           phoneNumber: senderPhone,
           engagedAt: admin.firestore.FieldValue.serverTimestamp(),
-          ...utmData
+          syncedToSheets: false
         };
 
-        // Only add lastMessage if content exists
         if (messageContent && messageContent !== 'No text content') {
           updateData.lastMessage = messageContent;
         }
 
-        await docRef.update(updateData);
+        // Transactional update
+        await db.runTransaction(async (transaction) => {
+          const docRef = clicksCollection.doc(sessionId);
+          const doc = await transaction.get(docRef);
+          
+          if (doc.exists) {
+            transaction.update(docRef, updateData);
+          } else {
+            transaction.set(docRef, {
+              ...utmData,
+              ...updateData,
+              timestamp: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+        });
 
-        console.log(`Processed ${event.context ? 'UTM-tracked' : 'direct'} message from ${senderPhone}`);
+        console.log(`Processed message from ${senderPhone}, session ID: ${sessionId}`);
         res.status(200).json({ 
           status: 'processed',
           sessionId,
@@ -187,17 +229,30 @@ setImmediate(async () => {
       }
     });
 
-    // Click storage endpoint
+    // Enhanced Click Storage Endpoint with Transaction
     app.post('/store-click', async (req, res) => {
       try {
         const { session_id, ...utmData } = req.body;
-        await clicksCollection.doc(session_id).set({
-          ...utmData,
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          hasEngaged: false,
-          syncedToSheets: false
+        
+        // Use transaction to prevent duplicate entries
+        await db.runTransaction(async (transaction) => {
+          const docRef = clicksCollection.doc(session_id);
+          const doc = await transaction.get(docRef);
+          
+          if (!doc.exists) {
+            transaction.set(docRef, {
+              ...utmData,
+              timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              hasEngaged: false,
+              syncedToSheets: false
+            });
+          }
         });
-        res.status(201).json({ message: 'Click stored' });
+        
+        res.status(201).json({ 
+          message: 'Click stored',
+          session_id: session_id
+        });
       } catch (err) {
         console.error('Storage error:', err);
         res.status(500).json({ error: 'Database operation failed' });
