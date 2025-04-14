@@ -38,15 +38,15 @@ function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
     return [
-      data.timestamp?.toDate().toISOString() || new Date().toISOString(),
-      data.phoneNumber || 'N/A',
-      data.source || 'Unknown',
-      data.medium || 'Unknown',
-      data.campaign || 'Unnamed Campaign',
-      data.content || 'No Content',
-      data.hasEngaged ? '✅ YES' : '❌ NO',
-      data.engagedAt?.toDate().toISOString() || 'N/A',
-      data.lastMessage?.substring(0, 100) + (data.lastMessage?.length > 100 ? '...' : '') || ''
+      data.timestamp?.toDate().toISOString() || new Date().toISOString(), // Timestamp of the event
+      data.phoneNumber || 'N/A', // Phone number of the user
+      data.source || 'direct', // UTM source or default to "direct"
+      data.medium || 'organic', // UTM medium or default to "organic"
+      data.campaign || 'none', // UTM campaign or default to "none"
+      data.content || 'none', // UTM content or default to "none"
+      data.hasEngaged ? '✅ YES' : '❌ NO', // Engagement status
+      data.engagedAt?.toDate().toISOString() || 'N/A', // Timestamp of engagement
+      data.lastMessage?.substring(0, 100) + (data.lastMessage?.length > 100 ? '...' : '') || '' // Last message text, truncated if too long
     ];
   });
 }
