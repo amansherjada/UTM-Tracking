@@ -112,112 +112,127 @@ setImmediate(async () => {
       }
     };
 
-    // Enhanced Gallabox Webhook Handler
+    // ********************************************
+    // UPDATED GALABOX WEBHOOK HANDLER STARTS HERE
+    // ********************************************
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
         const event = req.body;
         
-        // Extract message and sender safely
-        const messageContent = event.whatsapp?.text?.body || 'No text content';
+        // Extract message details
+        const messageContent = event.whatsapp?.text?.body || 
+                            (event.whatsapp?.image ? 'Image message' : 'No text content');
         const senderPhone = event.whatsapp?.from || event.sender;
+        const contactName = event.contact?.name || null;
         
         if (!senderPhone) {
           console.warn('Missing phone number in webhook payload');
           return res.status(400).json({ error: 'Missing phone number' });
         }
 
-        // Initialize tracking data
+        // Initialize tracking variables
         let sessionId;
         let utmData = {
-          source: 'direct',
-          medium: 'organic',
-          campaign: 'none',
+          source: 'direct_message',
+          medium: 'whatsapp',
+          campaign: 'organic',
           content: 'none'
         };
+        let attribution = 'direct';
 
-        // First try to use context if available
+        console.log(`Processing message from ${senderPhone}`);
+
+        // STEP 1: Try to use context parameter from WhatsApp
         if (event.context) {
           try {
             const context = JSON.parse(Buffer.from(event.context, 'base64').toString());
-            sessionId = context?.session_id;
-            utmData = context;
-            console.log('Found context with session ID:', sessionId);
+            if (context?.session_id) {
+              sessionId = context.session_id;
+              utmData = context;
+              attribution = 'context';
+              console.log(`Found context with session ID: ${sessionId}`);
+            }
           } catch (err) {
             console.warn('Invalid context format:', err);
           }
         }
 
-        // If no valid context, search for existing records
+        // STEP 2: Check for existing records with matching phone
         if (!sessionId) {
-          console.log('No context found, searching for records with phone:', senderPhone);
+          console.log(`No context found, searching for records with phone: ${senderPhone}`);
           
-          // Look for existing records with this phone
-          const existingByPhoneQuery = await clicksCollection
+          const existingPhoneQuery = await clicksCollection
             .where('phoneNumber', '==', senderPhone)
+            .where('hasEngaged', '==', false)
             .orderBy('timestamp', 'desc')
             .limit(1)
             .get();
           
-          if (!existingByPhoneQuery.empty) {
-            sessionId = existingByPhoneQuery.docs[0].id;
-            console.log('Found existing record by phone number:', sessionId);
+          if (!existingPhoneQuery.empty) {
+            sessionId = existingPhoneQuery.docs[0].id;
+            utmData = existingPhoneQuery.docs[0].data();
+            attribution = 'phone_match';
+            console.log(`Found existing record with matching phone: ${sessionId}`);
           } else {
-            // Look for recent unengaged clicks (last 30 minutes)
-            const thirtyMinutesAgo = admin.firestore.Timestamp.fromDate(
-              new Date(Date.now() - 30 * 60 * 1000)
-            );
+            // STEP 3: Create new direct message record
+            sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+            attribution = 'new_direct';
+            console.log(`Creating new direct message session: ${sessionId}`);
             
-            const recentClicksQuery = await clicksCollection
-              .where('hasEngaged', '==', false)
-              .where('timestamp', '>=', thirtyMinutesAgo)
-              .orderBy('timestamp', 'desc')
-              .limit(10)
-              .get();
-            
-            if (!recentClicksQuery.empty) {
-              sessionId = recentClicksQuery.docs[0].id;
-              utmData = recentClicksQuery.docs[0].data();
-              console.log('Found recent unengaged click:', sessionId);
-            } else {
-              sessionId = crypto.randomUUID();
-              console.log('Creating new session:', sessionId);
-            }
-          }
-        }
-
-        // Prepare update data
-        const updateData = {
-          hasEngaged: true,
-          phoneNumber: senderPhone,
-          engagedAt: admin.firestore.FieldValue.serverTimestamp(),
-          syncedToSheets: false
-        };
-
-        if (messageContent && messageContent !== 'No text content') {
-          updateData.lastMessage = messageContent;
-        }
-
-        // Transactional update
-        await db.runTransaction(async (transaction) => {
-          const docRef = clicksCollection.doc(sessionId);
-          const doc = await transaction.get(docRef);
-          
-          if (doc.exists) {
-            transaction.update(docRef, updateData);
-          } else {
-            transaction.set(docRef, {
+            await clicksCollection.doc(sessionId).set({
               ...utmData,
-              ...updateData,
-              timestamp: admin.firestore.FieldValue.serverTimestamp()
+              timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              hasEngaged: true,
+              phoneNumber: senderPhone,
+              lastMessage: messageContent,
+              engagedAt: admin.firestore.FieldValue.serverTimestamp(),
+              syncedToSheets: false,
+              contactName: contactName,
+              attribution_source: attribution
             });
           }
-        });
+        }
 
-        console.log(`Processed message from ${senderPhone}, session ID: ${sessionId}`);
+        // STEP 4: Update existing record if needed
+        if (attribution !== 'new_direct') {
+          const updateData = {
+            hasEngaged: true,
+            phoneNumber: senderPhone,
+            engagedAt: admin.firestore.FieldValue.serverTimestamp(),
+            syncedToSheets: false,
+            attribution_source: attribution
+          };
+
+          if (contactName) {
+            updateData.contactName = contactName;
+          }
+
+          if (messageContent && messageContent !== 'No text content') {
+            updateData.lastMessage = messageContent;
+          }
+
+          await db.runTransaction(async (transaction) => {
+            const docRef = clicksCollection.doc(sessionId);
+            const doc = await transaction.get(docRef);
+            
+            if (doc.exists) {
+              transaction.update(docRef, updateData);
+            } else {
+              transaction.set(docRef, {
+                ...utmData,
+                ...updateData,
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
+              });
+            }
+          });
+        }
+
+        console.log(`Processed message from ${senderPhone}, session: ${sessionId}, attribution: ${attribution}`);
         res.status(200).json({ 
           status: 'processed',
           sessionId,
-          source: utmData.source
+          source: utmData.source,
+          attribution: attribution
         });
 
       } catch (err) {
@@ -228,13 +243,15 @@ setImmediate(async () => {
         });
       }
     });
+    // ******************************************
+    // UPDATED GALABOX WEBHOOK HANDLER ENDS HERE
+    // ******************************************
 
-    // Enhanced Click Storage Endpoint with Transaction
+    // Click storage endpoint
     app.post('/store-click', async (req, res) => {
       try {
         const { session_id, ...utmData } = req.body;
         
-        // Use transaction to prevent duplicate entries
         await db.runTransaction(async (transaction) => {
           const docRef = clicksCollection.doc(session_id);
           const doc = await transaction.get(docRef);
