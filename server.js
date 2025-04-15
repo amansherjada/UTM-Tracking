@@ -112,25 +112,27 @@ setImmediate(async () => {
       }
     };
 
-    // ********************************************
-    // UPDATED GALABOX WEBHOOK HANDLER STARTS HERE
-    // ********************************************
+    // Gallabox Webhook Handler
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
+        console.log('Received context:', req.body.whatsapp?.context);
         const event = req.body;
         
-        // Extract message details
+        // Phone number normalization
+        let senderPhone = event.whatsapp?.from?.replace(/^0+/, '') || '';
+        const countryCode = '91';
+        if (senderPhone && !senderPhone.startsWith(countryCode)) {
+          senderPhone = `${countryCode}${senderPhone}`;
+        }
+
         const messageContent = event.whatsapp?.text?.body || 
                             (event.whatsapp?.image ? 'Image message' : 'No text content');
-        const senderPhone = event.whatsapp?.from || event.sender;
         const contactName = event.contact?.name || null;
         
         if (!senderPhone) {
-          console.warn('Missing phone number in webhook payload');
           return res.status(400).json({ error: 'Missing phone number' });
         }
 
-        // Initialize tracking variables
         let sessionId;
         let utmData = {
           source: 'direct_message',
@@ -140,9 +142,7 @@ setImmediate(async () => {
         };
         let attribution = 'direct';
 
-        console.log(`Processing message from ${senderPhone}`);
-
-        // STEP 1: Try to use context parameter from WhatsApp
+        // Context handling
         if (event.context) {
           try {
             const context = JSON.parse(Buffer.from(event.context, 'base64').toString());
@@ -150,71 +150,61 @@ setImmediate(async () => {
               sessionId = context.session_id;
               utmData = context;
               attribution = 'context';
-              console.log(`Found context with session ID: ${sessionId}`);
+              console.log(`Context match: ${sessionId}`);
             }
           } catch (err) {
             console.warn('Invalid context format:', err);
           }
         }
 
-        // STEP 2: Check for existing records with matching phone
+        // Phone matching
         if (!sessionId) {
-          console.log(`No context found, searching for records with phone: ${senderPhone}`);
-          
-          const existingPhoneQuery = await clicksCollection
+          const phoneMatch = await clicksCollection
             .where('phoneNumber', '==', senderPhone)
             .where('hasEngaged', '==', false)
             .orderBy('timestamp', 'desc')
             .limit(1)
             .get();
-          
-          if (!existingPhoneQuery.empty) {
-            sessionId = existingPhoneQuery.docs[0].id;
-            utmData = existingPhoneQuery.docs[0].data();
+
+          if (!phoneMatch.empty) {
+            sessionId = phoneMatch.docs[0].id;
+            utmData = phoneMatch.docs[0].data();
             attribution = 'phone_match';
-            console.log(`Found existing record with matching phone: ${sessionId}`);
-          } else {
-            // STEP 3: Create new direct message record
-            sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-            attribution = 'new_direct';
-            console.log(`Creating new direct message session: ${sessionId}`);
-            
-            await clicksCollection.doc(sessionId).set({
-              ...utmData,
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
-              hasEngaged: true,
-              phoneNumber: senderPhone,
-              lastMessage: messageContent,
-              engagedAt: admin.firestore.FieldValue.serverTimestamp(),
-              syncedToSheets: false,
-              contactName: contactName,
-              attribution_source: attribution
-            });
           }
         }
 
-        // STEP 4: Update existing record if needed
+        // Create new direct record if no matches
+        if (!sessionId) {
+          sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+          attribution = 'new_direct';
+          await clicksCollection.doc(sessionId).set({
+            ...utmData,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            hasEngaged: true,
+            phoneNumber: senderPhone,
+            lastMessage: messageContent,
+            engagedAt: admin.firestore.FieldValue.serverTimestamp(),
+            syncedToSheets: false,
+            contactName: contactName,
+            attribution_source: attribution
+          });
+        }
+
+        // Update existing records
         if (attribution !== 'new_direct') {
           const updateData = {
             hasEngaged: true,
             phoneNumber: senderPhone,
             engagedAt: admin.firestore.FieldValue.serverTimestamp(),
             syncedToSheets: false,
-            attribution_source: attribution
+            attribution_source: attribution,
+            ...(contactName && { contactName }),
+            ...(messageContent && { lastMessage: messageContent })
           };
-
-          if (contactName) {
-            updateData.contactName = contactName;
-          }
-
-          if (messageContent && messageContent !== 'No text content') {
-            updateData.lastMessage = messageContent;
-          }
 
           await db.runTransaction(async (transaction) => {
             const docRef = clicksCollection.doc(sessionId);
             const doc = await transaction.get(docRef);
-            
             if (doc.exists) {
               transaction.update(docRef, updateData);
             } else {
@@ -227,7 +217,6 @@ setImmediate(async () => {
           });
         }
 
-        console.log(`Processed message from ${senderPhone}, session: ${sessionId}, attribution: ${attribution}`);
         res.status(200).json({ 
           status: 'processed',
           sessionId,
@@ -243,14 +232,11 @@ setImmediate(async () => {
         });
       }
     });
-    // ******************************************
-    // UPDATED GALABOX WEBHOOK HANDLER ENDS HERE
-    // ******************************************
 
-    // Click storage endpoint
+    // Store Click Endpoint
     app.post('/store-click', async (req, res) => {
       try {
-        const { session_id, ...utmData } = req.body;
+        const { session_id, phoneNumber, ...utmData } = req.body;
         
         await db.runTransaction(async (transaction) => {
           const docRef = clicksCollection.doc(session_id);
@@ -259,6 +245,7 @@ setImmediate(async () => {
           if (!doc.exists) {
             transaction.set(docRef, {
               ...utmData,
+              phoneNumber: phoneNumber || null,
               timestamp: admin.firestore.FieldValue.serverTimestamp(),
               hasEngaged: false,
               syncedToSheets: false
