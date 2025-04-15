@@ -208,28 +208,52 @@ setImmediate(async () => {
           }
         }
 
-        // Fallback: Create new direct message record
+        // Start of Modified Direct Message Handling
         if (!sessionId) {
-          sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-          attribution = 'new_direct';
-          console.log(`Creating new direct record: ${sessionId}`);
-          
-          await clicksCollection.doc(sessionId).set({
-            ...utmData,
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            hasEngaged: true,
-            phoneNumber: normalizedPhone,
-            lastMessage: messageContent,
-            engagedAt: admin.firestore.FieldValue.serverTimestamp(),
-            syncedToSheets: false,
-            contactId,
-            conversationId,
-            contactName
-          });
+          if (conversationId) {
+            const existingDirectQuery = await clicksCollection
+              .where('conversationId', '==', conversationId)
+              .where('source', '==', 'direct_message')
+              .limit(1)
+              .get();
+
+            if (!existingDirectQuery.empty) {
+              sessionId = existingDirectQuery.docs[0].id;
+              attribution = 'existing_direct';
+              console.log(`Found existing direct conversation: ${conversationId}`);
+
+              await clicksCollection.doc(sessionId).update({
+                lastMessage: messageContent,
+                engagedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+            } else if (process.env.STORE_DIRECT_MESSAGES === 'true') {
+              sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+              attribution = 'new_direct';
+              console.log(`Creating new direct record: ${sessionId}`);
+              
+              await clicksCollection.doc(sessionId).set({
+                ...utmData,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                hasEngaged: true,
+                phoneNumber: normalizedPhone,
+                lastMessage: messageContent,
+                engagedAt: admin.firestore.FieldValue.serverTimestamp(),
+                syncedToSheets: false,
+                contactId,
+                conversationId,
+                contactName
+              });
+            } else {
+              console.log(`Skipping direct message from ${normalizedPhone}`);
+              attribution = 'ignored_direct';
+              sessionId = 'not_stored';
+            }
+          }
         }
+        // End of Modified Direct Message Handling
 
         // Update existing records
-        if (attribution !== 'new_direct') {
+        if (attribution !== 'new_direct' && sessionId !== 'not_stored') {
           const updateData = {
             hasEngaged: true,
             phoneNumber: normalizedPhone,
@@ -275,7 +299,7 @@ setImmediate(async () => {
       }
     });
 
-    // Click Storage Endpoint
+    // Store Click Endpoint
     app.post('/store-click', async (req, res) => {
       try {
         const { session_id, ...utmData } = req.body;
