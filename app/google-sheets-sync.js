@@ -1,6 +1,7 @@
 const { Firestore } = require('@google-cloud/firestore');
 const { GoogleAuth } = require('google-auth-library');
 const { sheets } = require('@googleapis/sheets');
+const admin = require('firebase-admin'); // Added missing admin import
 require('dotenv').config();
 const fs = require('fs');
 
@@ -69,7 +70,6 @@ async function syncToSheets() {
       });
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
 
-      // Modified query to exclude direct messages
       const snapshot = await db.collection('utmClicks')
         .where('hasEngaged', '==', true)
         .where('syncedToSheets', '==', false)
@@ -95,9 +95,10 @@ async function syncToSheets() {
         });
       });
 
+      // Modified range to include all columns
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A1`,
+        range: `${SHEET_NAME}!A:M`, // Changed from A1 to A:M
         valueInputOption: 'USER_ENTERED',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: rows }
