@@ -36,14 +36,16 @@ function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
     return [
-      data.timestamp?.toDate().toISOString() || new Date().toISOString(),
+      data.click_time?.toDate().toISOString() || new Date().toISOString(),
       data.phoneNumber || 'N/A',
       data.source || 'direct',
       data.medium || 'organic',
       data.campaign || 'none',
       data.content || 'none',
       data.hasEngaged ? '✅ YES' : '❌ NO',
-      data.engagedAt?.toDate().toISOString() || 'N/A',
+      data.engagedAt?.toDate ? data.engagedAt.toDate().toISOString() : 
+      data.engagedAt instanceof Date ? data.engagedAt.toISOString() : 
+      'N/A',
       data.attribution_source || 'unknown',
       data.contactId || 'N/A',
       data.conversationId || 'N/A',
@@ -52,6 +54,7 @@ function convertToSheetRows(docs) {
     ];
   });
 }
+
 
 async function syncToSheets() {
   const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
