@@ -157,7 +157,29 @@ setImmediate(async () => {
           }
         }
 
-        // Phone matching
+        // TEMPORARY FIX START (5-minute matching window)
+        if (!sessionId) {
+          const fiveMinutesAgo = admin.firestore.Timestamp.fromDate(
+            new Date(Date.now() - 5 * 60 * 1000)
+          );
+          
+          const phoneMatch = await clicksCollection
+            .where('phoneNumber', '==', senderPhone)
+            .where('timestamp', '>=', fiveMinutesAgo)
+            .orderBy('timestamp', 'desc')
+            .limit(1)
+            .get();
+
+          if (!phoneMatch.empty) {
+            sessionId = phoneMatch.docs[0].id;
+            utmData = phoneMatch.docs[0].data();
+            attribution = 'recent_click';
+            console.log(`Matched with recent click (5min window): ${sessionId}`);
+          }
+        }
+        // TEMPORARY FIX END
+
+        // Phone matching fallback (original logic)
         if (!sessionId) {
           const phoneMatch = await clicksCollection
             .where('phoneNumber', '==', senderPhone)
