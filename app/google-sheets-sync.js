@@ -31,29 +31,27 @@ async function initializeSheetsClient() {
   }
 }
 
-// Enhanced row conversion with new fields
 function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
     return [
       data.timestamp?.toDate().toISOString() || new Date().toISOString(),
       data.phoneNumber || 'N/A',
-      data.source === 'direct_message' ? 'Direct Message' : data.source || 'direct',
+      data.source || 'direct',
       data.medium || 'organic',
       data.campaign || 'none',
       data.content || 'none',
       data.hasEngaged ? '✅ YES' : '❌ NO',
       data.engagedAt?.toDate().toISOString() || 'N/A',
       data.attribution_source || 'unknown',
-      data.contactId || 'N/A',          // New field
-      data.conversationId || 'N/A',     // New field
-      data.contactName || 'Anonymous',  // New field
-      data.lastMessage?.substring(0, 150).replace(/\n/g, ' ') || '' // Truncated message
+      data.contactId || 'N/A',
+      data.conversationId || 'N/A',
+      data.contactName || 'Anonymous',
+      data.lastMessage?.substring(0, 150).replace(/\n/g, ' ') || ''
     ];
   });
 }
 
-// Main sync function with enhanced error handling
 async function syncToSheets() {
   const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
   const SHEET_NAME = 'UTM_Tracking';
@@ -66,17 +64,17 @@ async function syncToSheets() {
     try {
       const sheetsClient = await initializeSheetsClient();
       
-      // Verify spreadsheet access
       const { data: spreadsheet } = await sheetsClient.spreadsheets.get({
         spreadsheetId: SPREADSHEET_ID
       });
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
 
-      // Get unsynced records
+      // Modified query to exclude direct messages
       const snapshot = await db.collection('utmClicks')
         .where('hasEngaged', '==', true)
         .where('syncedToSheets', '==', false)
-        .limit(250)  // Increased batch size
+        .where('source', '!=', 'direct_message')
+        .limit(250)
         .get();
 
       if (snapshot.empty) {
@@ -87,7 +85,6 @@ async function syncToSheets() {
       const rows = convertToSheetRows(snapshot.docs);
       console.log(`📊 Processing ${rows.length} records`);
 
-      // Batch update Firestore
       const batch = db.batch();
       const updateTime = admin.firestore.FieldValue.serverTimestamp();
       
@@ -98,7 +95,6 @@ async function syncToSheets() {
         });
       });
 
-      // Append to Google Sheets
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A1`,
@@ -131,7 +127,6 @@ async function syncToSheets() {
   }
 }
 
-// Enhanced scheduled sync
 async function scheduledSync() {
   const startTime = Date.now();
   const result = { 
