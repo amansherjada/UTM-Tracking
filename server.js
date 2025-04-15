@@ -112,24 +112,27 @@ setImmediate(async () => {
       }
     };
 
-    // Gallabox Webhook Handler
+    // Enhanced Gallabox Webhook Handler
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
-        console.log('Received context:', req.body.whatsapp?.context);
         const event = req.body;
+        console.log('Incoming webhook payload:', JSON.stringify(event, null, 2));
         
+        // Extract critical identifiers
+        const senderPhone = event.whatsapp?.from?.replace(/^0+/, '') || '';
+        const contactId = event.contactId || event.contact?.id || null;
+        const conversationId = event.conversationId || null;
+        const contactName = event.contact?.name || null;
+        const messageContent = event.whatsapp?.text?.body || 'No text content';
+
         // Phone number normalization
-        let senderPhone = event.whatsapp?.from?.replace(/^0+/, '') || '';
+        let normalizedPhone = senderPhone;
         const countryCode = '91';
-        if (senderPhone && !senderPhone.startsWith(countryCode)) {
-          senderPhone = `${countryCode}${senderPhone}`;
+        if (normalizedPhone && !normalizedPhone.startsWith(countryCode)) {
+          normalizedPhone = `${countryCode}${normalizedPhone}`;
         }
 
-        const messageContent = event.whatsapp?.text?.body || 
-                            (event.whatsapp?.image ? 'Image message' : 'No text content');
-        const contactName = event.contact?.name || null;
-        
-        if (!senderPhone) {
+        if (!normalizedPhone) {
           return res.status(400).json({ error: 'Missing phone number' });
         }
 
@@ -142,7 +145,7 @@ setImmediate(async () => {
         };
         let attribution = 'direct';
 
-        // Context handling
+        // Matching Priority 1: Context Parameter
         if (event.context) {
           try {
             const context = JSON.parse(Buffer.from(event.context, 'base64').toString());
@@ -157,32 +160,41 @@ setImmediate(async () => {
           }
         }
 
-        // TEMPORARY FIX START (5-minute matching window)
-        if (!sessionId) {
+        // Matching Priority 2: Gallabox Identifiers
+        if (!sessionId && (contactId || conversationId)) {
+          console.log(`Attempting Gallabox ID match - Contact: ${contactId}, Conversation: ${conversationId}`);
+          
           const fiveMinutesAgo = admin.firestore.Timestamp.fromDate(
             new Date(Date.now() - 5 * 60 * 1000)
           );
-          
-          const phoneMatch = await clicksCollection
-            .where('phoneNumber', '==', senderPhone)
+
+          const query = clicksCollection
+            .where('hasEngaged', '==', false)
             .where('timestamp', '>=', fiveMinutesAgo)
             .orderBy('timestamp', 'desc')
-            .limit(1)
-            .get();
+            .limit(5);
 
-          if (!phoneMatch.empty) {
-            sessionId = phoneMatch.docs[0].id;
-            utmData = phoneMatch.docs[0].data();
-            attribution = 'recent_click';
-            console.log(`Matched with recent click (5min window): ${sessionId}`);
+          const snapshot = await query.get();
+
+          if (!snapshot.empty) {
+            sessionId = snapshot.docs[0].id;
+            utmData = snapshot.docs[0].data();
+            attribution = 'gallabox_id_match';
+            console.log(`Matched with recent click: ${sessionId}`);
+
+            // Update click record with Gallabox IDs
+            await clicksCollection.doc(sessionId).update({
+              contactId,
+              conversationId,
+              contactName: contactName || null
+            });
           }
         }
-        // TEMPORARY FIX END
 
-        // Phone matching fallback (original logic)
+        // Matching Priority 3: Phone Number (if available in click records)
         if (!sessionId) {
           const phoneMatch = await clicksCollection
-            .where('phoneNumber', '==', senderPhone)
+            .where('phoneNumber', '==', normalizedPhone)
             .where('hasEngaged', '==', false)
             .orderBy('timestamp', 'desc')
             .limit(1)
@@ -192,23 +204,27 @@ setImmediate(async () => {
             sessionId = phoneMatch.docs[0].id;
             utmData = phoneMatch.docs[0].data();
             attribution = 'phone_match';
+            console.log(`Phone number match: ${sessionId}`);
           }
         }
 
-        // Create new direct record if no matches
+        // Fallback: Create new direct message record
         if (!sessionId) {
           sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
           attribution = 'new_direct';
+          console.log(`Creating new direct record: ${sessionId}`);
+          
           await clicksCollection.doc(sessionId).set({
             ...utmData,
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
             hasEngaged: true,
-            phoneNumber: senderPhone,
+            phoneNumber: normalizedPhone,
             lastMessage: messageContent,
             engagedAt: admin.firestore.FieldValue.serverTimestamp(),
             syncedToSheets: false,
-            contactName: contactName,
-            attribution_source: attribution
+            contactId,
+            conversationId,
+            contactName
           });
         }
 
@@ -216,10 +232,12 @@ setImmediate(async () => {
         if (attribution !== 'new_direct') {
           const updateData = {
             hasEngaged: true,
-            phoneNumber: senderPhone,
+            phoneNumber: normalizedPhone,
             engagedAt: admin.firestore.FieldValue.serverTimestamp(),
             syncedToSheets: false,
             attribution_source: attribution,
+            contactId,
+            conversationId,
             ...(contactName && { contactName }),
             ...(messageContent && { lastMessage: messageContent })
           };
@@ -227,6 +245,7 @@ setImmediate(async () => {
           await db.runTransaction(async (transaction) => {
             const docRef = clicksCollection.doc(sessionId);
             const doc = await transaction.get(docRef);
+            
             if (doc.exists) {
               transaction.update(docRef, updateData);
             } else {
@@ -239,11 +258,12 @@ setImmediate(async () => {
           });
         }
 
+        console.log(`Processed message from ${normalizedPhone} with attribution: ${attribution}`);
         res.status(200).json({ 
           status: 'processed',
           sessionId,
           source: utmData.source,
-          attribution: attribution
+          attribution
         });
 
       } catch (err) {
@@ -255,10 +275,10 @@ setImmediate(async () => {
       }
     });
 
-    // Store Click Endpoint
+    // Click Storage Endpoint
     app.post('/store-click', async (req, res) => {
       try {
-        const { session_id, phoneNumber, ...utmData } = req.body;
+        const { session_id, ...utmData } = req.body;
         
         await db.runTransaction(async (transaction) => {
           const docRef = clicksCollection.doc(session_id);
@@ -267,7 +287,6 @@ setImmediate(async () => {
           if (!doc.exists) {
             transaction.set(docRef, {
               ...utmData,
-              phoneNumber: phoneNumber || null,
               timestamp: admin.firestore.FieldValue.serverTimestamp(),
               hasEngaged: false,
               syncedToSheets: false
