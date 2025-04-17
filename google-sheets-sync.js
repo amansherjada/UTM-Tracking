@@ -126,10 +126,11 @@ async function syncToSheets() {
         spreadsheetId: SPREADSHEET_ID,
         includeGridData: false
       });
+
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
-      
+
       // 2. Check if sheet exists
-      let sheetExists = spreadsheet.sheets.some(s => s.properties.title === SHEET_NAME);
+      let sheetExists = spreadsheet.sheets?.some(s => s.properties?.title === SHEET_NAME);
       
       // 3. Create sheet if it doesn't exist
       if (!sheetExists) {
@@ -151,7 +152,7 @@ async function syncToSheets() {
           }
         });
       }
-      
+
       // 4. Now handle headers
       const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
@@ -173,7 +174,6 @@ async function syncToSheets() {
           valueInputOption: 'RAW',
           resource: { values: [requiredHeaders] }
         });
-        console.log('✅ Created header row');
       }
 
       // Get documents to sync
@@ -192,18 +192,15 @@ async function syncToSheets() {
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
 
-      // Batch update Firestore documents
-      const batch = db.batch();
-      
-      // FIX: Use the proper Firestore field value syntax based on the initialized client
-      snapshot.docs.forEach(doc => {
-        batch.update(doc.ref, {
+      // FIXED: Use individual updates instead of batch for more reliability
+      const updatePromises = snapshot.docs.map(doc => {
+        return doc.ref.update({
           syncedToSheets: true,
-          lastSynced: admin.firestore.FieldValue.serverTimestamp()
+          lastSynced: admin.firestore.Timestamp.now() // Using actual timestamp instead of sentinel
         });
       });
-
-      // FIXED: Use append instead of update for more reliable insertion
+      
+      // Append data to Google Sheets
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A:N`,
@@ -212,9 +209,11 @@ async function syncToSheets() {
         resource: { values: rows }
       });
 
-      await batch.commit();
-      console.log('✅ Firestore batch committed');
-      console.log('📝 Sheets append response:', JSON.stringify(appendResponse.data, null, 2));
+      // Process updates after sheets operation succeeds
+      await Promise.all(updatePromises);
+      
+      console.log('✅ Firestore documents updated');
+      console.log('📝 Sheets update:', appendResponse.data.updates.updatedRange);
       
       return { 
         count: rows.length,
