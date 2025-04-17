@@ -36,36 +36,35 @@ function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
     console.log('Processing document ID:', doc.id);
+    console.log('Raw document data:', JSON.stringify(data, null, 2));
     
-    // IMPROVED: Enhanced path checking for multiple levels of nesting
-    const getNestedValue = (data, possiblePaths, defaultValue) => {
-      // Try each possible path in order of priority
-      for (const path of possiblePaths) {
-        try {
-          let value = data;
-          const parts = path.split('.');
-          
-          for (const part of parts) {
-            if (value === undefined || value === null || typeof value !== 'object') {
-              value = undefined;
-              break;
-            }
-            value = value[part];
+    // Enhanced deep field access with debugging
+    const getField = (fieldPath, defaultValue = 'N/A') => {
+      try {
+        const parts = fieldPath.split('.');
+        let value = data;
+        
+        for (const part of parts) {
+          if (!value || typeof value !== 'object') {
+            console.log(`⚠️ Field path lookup failed at "${part}" in "${fieldPath}"`);
+            return defaultValue;
           }
-          
-          if (value !== undefined && value !== null && value !== '') {
-            console.log(`✅ Found value using path ${path}: ${value}`);
-            return value;
+          value = value[part];
+          if (value === undefined || value === null) {
+            console.log(`⚠️ Null/undefined value at "${part}" in "${fieldPath}"`);
+            return defaultValue;
           }
-        } catch (err) {
-          console.log(`❌ Path ${path} failed: ${err.message}`);
         }
+        
+        console.log(`✅ Found value for "${fieldPath}": ${value}`);
+        return value;
+      } catch (err) {
+        console.error(`❌ Error accessing "${fieldPath}":`, err.message);
+        return defaultValue;
       }
-      console.log(`⚠️ Using default value for ${possiblePaths[0]}: ${defaultValue}`);
-      return defaultValue;
     };
     
-    // Extract timestamp with fallbacks
+    // Extract timestamps
     let timestamp;
     if (data.click_time && typeof data.click_time.toDate === 'function') {
       timestamp = data.click_time.toDate();
@@ -75,7 +74,6 @@ function convertToSheetRows(docs) {
       timestamp = new Date();
     }
     
-    // Extract engagement timestamp
     let engagedTimestamp = 'N/A';
     if (data.engagedAt) {
       if (typeof data.engagedAt.toDate === 'function') {
@@ -85,51 +83,47 @@ function convertToSheetRows(docs) {
       }
     }
     
-    // IMPROVED: Check multiple possible paths for each field with different naming conventions
-    return [
+    // Extract original params with priority resolution
+    const originalParams = data.original_params || {};
+    
+    // Create explicit string values with fallbacks for all fields
+    const sourceValue = String(getField('original_params.source') || data.source || 'direct');
+    const mediumValue = String(getField('original_params.medium') || data.medium || 'organic');
+    const campaignValue = String(getField('original_params.campaign') || data.campaign || 'none');
+    const contentValue = String(getField('original_params.content') || data.content || 'none');
+    const placementValue = String(getField('original_params.placement') || data.placement || 'N/A');
+    const attributionValue = String(data.attribution_source || 'unknown');
+    const contactIdValue = String(data.contactId || 'N/A');
+    const conversationIdValue = String(data.conversationId || 'N/A');
+    const contactNameValue = String(data.contactName || 'Anonymous');
+    const lastMessageValue = data.lastMessage ? 
+      String(data.lastMessage).substring(0, 150).replace(/\n/g, ' ') : '';
+      
+    console.log('Attribution Source:', attributionValue);
+    console.log('Contact ID:', contactIdValue);
+    console.log('Conversation ID:', conversationIdValue);
+    console.log('Contact Name:', contactNameValue);
+    
+    // Create the row with explicit String conversions to avoid data type issues
+    const row = [
       timestamp.toISOString(),
-      data.phoneNumber || 'N/A',
-      getNestedValue(data, [
-        'original_params.campaign_source',
-        'original_params.original_params.campaign_source',
-        'source'
-      ], 'direct'),
-      
-      getNestedValue(data, [
-        'original_params.medium',
-        'original_params.adset_name',
-        'original_params.original_params.adset_name',
-        'medium'
-      ], 'organic'),
-      
-      getNestedValue(data, [
-        'original_params.campaign',
-        'original_params.campaign_name',
-        'original_params.original_params.campaign_name',
-        'campaign'
-      ], 'none'),
-      
-      getNestedValue(data, [
-        'original_params.content',
-        'original_params.ad_name',
-        'original_params.original_params.ad_name',
-        'content'
-      ], 'none'),
-      
-      getNestedValue(data, [
-        'original_params.placement',
-        'original_params.original_params.placement',
-        'placement'
-      ], 'N/A'),
-      
+      String(data.phoneNumber || 'N/A'),
+      sourceValue,
+      mediumValue,
+      campaignValue,
+      contentValue,
+      placementValue,
       data.hasEngaged ? '✅ YES' : '❌ NO',
       engagedTimestamp,
-      data.attribution_source || 'unknown',
-      data.contactId || 'N/A',
-      data.conversationId || 'N/A',
-      data.contactName || 'Anonymous',
-      data.lastMessage?.substring(0, 150).replace(/\n/g, ' ') || ''
+      attributionValue,
+      contactIdValue,
+      conversationIdValue,
+      contactNameValue,
+      lastMessageValue
     ];
+    
+    console.log('Generated row data:', JSON.stringify(row));
+    return row;
   });
 }
 
@@ -150,26 +144,30 @@ async function syncToSheets() {
       });
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
 
-      // Verify/update headers
+      // Verify headers match expected format
       const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A1:N1`
       });
       
-      if (!sheetsData.values || sheetsData.values[0]?.length < 14) {
-        const headers = [
-          'Timestamp', 'Phone Number', 'Source', 'Medium', 'Campaign',
-          'Content', 'Placement', 'Engaged', 'Engaged At', 'Attribution',
-          'Contact ID', 'Conversation ID', 'Contact Name', 'Last Message'
-        ];
-        
+      const expectedHeaders = [
+        'Timestamp', 'Phone Number', 'UTM Source', 'UTM Medium', 'UTM Campaign',
+        'UTM Content', 'Placement', 'Engaged', 'Engaged At', 'Attribution Source',
+        'Contact ID', 'Conversation ID', 'Contact Name', 'Last Message'
+      ];
+      
+      if (!sheetsData.values || !sheetsData.values[0]) {
+        // Sheet is empty, add headers
         await sheetsClient.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
           range: `${SHEET_NAME}!A1:N1`,
           valueInputOption: 'RAW',
-          requestBody: { values: [headers] }
+          requestBody: { values: [expectedHeaders] }
         });
-        console.log('✅ Updated sheet headers');
+        console.log('✅ Added header row to empty sheet');
+      } else {
+        console.log('Existing headers:', JSON.stringify(sheetsData.values[0]));
+        console.log('Expected headers:', JSON.stringify(expectedHeaders));
       }
 
       const snapshot = await db.collection('utmClicks')
@@ -187,6 +185,7 @@ async function syncToSheets() {
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
       
+      // Batch update operations for better reliability
       const batch = db.batch();
       const updateTime = admin.firestore.FieldValue.serverTimestamp();
       
@@ -197,17 +196,24 @@ async function syncToSheets() {
         });
       });
 
-      const appendResponse = await sheetsClient.spreadsheets.values.append({
+      // Add debug logs for row data
+      console.log(`Sending ${rows.length} rows to Google Sheets`);
+      console.log('First row sample:', JSON.stringify(rows[0]));
+      
+      // Use update instead of append for more reliable insertion
+      const rowsRange = `${SHEET_NAME}!A${sheetsData.values.length + 1}:N${sheetsData.values.length + rows.length}`;
+      console.log(`Writing to range: ${rowsRange}`);
+      
+      const updateResponse = await sheetsClient.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:N`,
+        range: rowsRange,
         valueInputOption: 'USER_ENTERED',
-        insertDataOption: 'INSERT_ROWS',
         requestBody: { values: rows }
       });
 
       await batch.commit();
       console.log('✅ Sync completed successfully');
-      console.log('📝 Updated range:', appendResponse.data.updates.updatedRange);
+      console.log('📝 Updated range:', updateResponse.data.updatedRange);
       
       return { 
         count: rows.length,
