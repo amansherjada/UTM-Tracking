@@ -299,46 +299,38 @@ setImmediate(async () => {
       }
     });
 
-    // MODIFIED Store Click Endpoint to handle new Facebook dynamic parameters
     app.post('/store-click', async (req, res) => {
       try {
-        const { session_id, ...rawData } = req.body;
+        const { session_id, original_params, ...rawData } = req.body;
         
-        // Handle Facebook dynamic parameters from the new URL format
-        // Transform them into standard UTM parameters
+        // Extract values with consistent naming
+        // Prioritize original_params if present, otherwise use top-level fields
+        const params = original_params || {};
+        
+        // Create standardized structure
         const utmData = {
-          // Map Campaign Source / site_source_name to source
-          source: rawData['Campaign_Source'] || 
-                 rawData['site_source_name'] || 
-                 'facebook', // Default to facebook if not provided
+          // Ensure top-level fields match the ones we extract in Google Sheets
+          source: params.source || rawData.source || 'facebook',
+          medium: params.medium || rawData.medium || 'fb_ads',
+          campaign: params.campaign || rawData.campaign || 'unknown',
+          content: params.content || rawData.content || 'unknown',
+          placement: params.placement || rawData.placement || 'unknown',
           
-          // Map Ad Set Name / adset.name to medium
-          medium: rawData['Ad_Set_Name'] || 
-                 rawData['adset.name'] || 
-                 'fb_ads', // Default
+          // Store original parameters in a flat structure (no nesting)
+          original_params: {
+            ...params,
+            // Ensure these fields exist for backwards compatibility
+            campaign: params.campaign || rawData.campaign || 'unknown',
+            medium: params.medium || rawData.medium || 'fb_ads',
+            source: params.source || rawData.source || 'facebook',
+            content: params.content || rawData.content || 'unknown',
+            placement: params.placement || rawData.placement || 'unknown'
+          },
           
-          // Map Campaign Name / campaign.name to campaign
-          campaign: rawData['Campaign_Name'] || 
-                   rawData['campaign.name'] || 
-                   'unknown', // Default
-          
-          // Map Ad Name / ad.name to content
-          content: rawData['Ad_Name'] || 
-                  rawData['ad.name'] || 
-                  'unknown', // Default
-          
-          // Store Placement information
-          placement: rawData['Placement'] || 
-                    rawData['placement'] || 
-                    'unknown', // Default
-          
-          // Store all original parameters for reference
-          original_params: { ...rawData },
-          
-          // Add click time for tracking
+          // Add timestamp
           click_time: admin.firestore.FieldValue.serverTimestamp()
         };
-
+    
         await db.runTransaction(async (transaction) => {
           const docRef = clicksCollection.doc(session_id);
           const doc = await transaction.get(docRef);
