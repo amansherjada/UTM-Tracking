@@ -32,10 +32,10 @@ async function initializeSheetsClient() {
   }
 }
 
-// MODIFIED to include the new 'placement' field and handle both old and new UTM formats
 function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
+    const originalParams = data.original_params || {};
     
     // Get timestamp from either click_time or timestamp field
     const timestamp = data.click_time?.toDate?.() || data.timestamp?.toDate?.() || new Date();
@@ -45,9 +45,11 @@ function convertToSheetRows(docs) {
       data.phoneNumber || 'N/A',
       data.source || 'direct',
       data.medium || 'organic',
-      data.campaign || 'none',
-      data.content || 'none',
-      data.placement || 'N/A', // Added new placement field
+      // Prioritize original_params campaign over top-level campaign
+      originalParams.campaign || data.campaign || 'none',
+      // Prioritize original_params content over top-level content
+      originalParams.ad_name || data.content || 'none',
+      data.placement || 'N/A',
       data.hasEngaged ? '✅ YES' : '❌ NO',
       data.engagedAt?.toDate ? data.engagedAt.toDate().toISOString() : 
       data.engagedAt instanceof Date ? data.engagedAt.toISOString() : 
@@ -60,6 +62,7 @@ function convertToSheetRows(docs) {
     ];
   });
 }
+
 
 async function syncToSheets() {
   const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
