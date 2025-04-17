@@ -36,94 +36,77 @@ function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
     console.log('Processing document ID:', doc.id);
-    console.log('Raw document data:', JSON.stringify(data, null, 2));
     
-    // Enhanced deep field access with debugging
-    const getField = (fieldPath, defaultValue = 'N/A') => {
-      try {
-        const parts = fieldPath.split('.');
-        let value = data;
-        
-        for (const part of parts) {
-          if (!value || typeof value !== 'object') {
-            console.log(`⚠️ Field path lookup failed at "${part}" in "${fieldPath}"`);
-            return defaultValue;
-          }
-          value = value[part];
-          if (value === undefined || value === null) {
-            console.log(`⚠️ Null/undefined value at "${part}" in "${fieldPath}"`);
-            return defaultValue;
-          }
-        }
-        
-        console.log(`✅ Found value for "${fieldPath}": ${value}`);
-        return value;
-      } catch (err) {
-        console.error(`❌ Error accessing "${fieldPath}":`, err.message);
-        return defaultValue;
-      }
-    };
-    
-    // Extract timestamps
+    // Extract timestamps with proper handling
     let timestamp;
-    if (data.click_time && typeof data.click_time.toDate === 'function') {
+    if (data.click_time?.toDate) {
       timestamp = data.click_time.toDate();
-    } else if (data.timestamp && typeof data.timestamp.toDate === 'function') {
+    } else if (data.timestamp?.toDate) {
       timestamp = data.timestamp.toDate();
     } else {
       timestamp = new Date();
     }
     
+    // Extract engagement timestamp
     let engagedTimestamp = 'N/A';
     if (data.engagedAt) {
-      if (typeof data.engagedAt.toDate === 'function') {
+      if (data.engagedAt?.toDate) {
         engagedTimestamp = data.engagedAt.toDate().toISOString();
       } else if (data.engagedAt instanceof Date) {
         engagedTimestamp = data.engagedAt.toISOString();
       }
     }
     
-    // Extract original params with priority resolution
+    // Extract parameters with explicit precedence
     const originalParams = data.original_params || {};
     
-    // Create explicit string values with fallbacks for all fields
-    const sourceValue = String(getField('original_params.source') || data.source || 'direct');
-    const mediumValue = String(getField('original_params.medium') || data.medium || 'organic');
-    const campaignValue = String(getField('original_params.campaign') || data.campaign || 'none');
-    const contentValue = String(getField('original_params.content') || data.content || 'none');
-    const placementValue = String(getField('original_params.placement') || data.placement || 'N/A');
-    const attributionValue = String(data.attribution_source || 'unknown');
-    const contactIdValue = String(data.contactId || 'N/A');
-    const conversationIdValue = String(data.conversationId || 'N/A');
-    const contactNameValue = String(data.contactName || 'Anonymous');
-    const lastMessageValue = data.lastMessage ? 
-      String(data.lastMessage).substring(0, 150).replace(/\n/g, ' ') : '';
-      
-    console.log('Attribution Source:', attributionValue);
-    console.log('Contact ID:', contactIdValue);
-    console.log('Conversation ID:', conversationIdValue);
-    console.log('Contact Name:', contactNameValue);
-    
-    // Create the row with explicit String conversions to avoid data type issues
-    const row = [
+    // Build the row with ALL fields mapped explicitly
+    const rowValues = [
+      // 1. Timestamp
       timestamp.toISOString(),
-      String(data.phoneNumber || 'N/A'),
-      sourceValue,
-      mediumValue,
-      campaignValue,
-      contentValue,
-      placementValue,
+      
+      // 2. Phone Number
+      data.phoneNumber || 'N/A',
+      
+      // 3. UTM Source
+      originalParams.source || data.source || 'direct',
+      
+      // 4. UTM Medium
+      originalParams.medium || data.medium || 'organic',
+      
+      // 5. UTM Campaign
+      originalParams.campaign || data.campaign || 'none',
+      
+      // 6. UTM Content
+      originalParams.content || data.content || 'none',
+      
+      // 7. Placement
+      originalParams.placement || data.placement || 'N/A',
+      
+      // 8. Engaged
       data.hasEngaged ? '✅ YES' : '❌ NO',
+      
+      // 9. Engaged At
       engagedTimestamp,
-      attributionValue,
-      contactIdValue,
-      conversationIdValue,
-      contactNameValue,
-      lastMessageValue
+      
+      // 10. Attribution Source
+      data.attribution_source || 'unknown',
+      
+      // 11. Contact ID
+      data.contactId || 'N/A',
+      
+      // 12. Conversation ID
+      data.conversationId || 'N/A',
+      
+      // 13. Contact Name
+      data.contactName || 'Anonymous',
+      
+      // 14. Last Message
+      data.lastMessage ? data.lastMessage.substring(0, 150).replace(/\n/g, ' ') : 'No text content'
     ];
-    
-    console.log('Generated row data:', JSON.stringify(row));
-    return row;
+
+    console.log('Row values to be inserted:', JSON.stringify(rowValues, null, 2));
+    return rowValues;
   });
 }
 
@@ -139,37 +122,37 @@ async function syncToSheets() {
     try {
       const sheetsClient = await initializeSheetsClient();
       
+      // Get spreadsheet metadata
       const { data: spreadsheet } = await sheetsClient.spreadsheets.get({
         spreadsheetId: SPREADSHEET_ID
       });
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
 
-      // Verify headers match expected format
+      // Verify headers
       const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A1:N1`
       });
-      
-      const expectedHeaders = [
-        'Timestamp', 'Phone Number', 'UTM Source', 'UTM Medium', 'UTM Campaign',
-        'UTM Content', 'Placement', 'Engaged', 'Engaged At', 'Attribution Source',
-        'Contact ID', 'Conversation ID', 'Contact Name', 'Last Message'
+
+      const requiredHeaders = [
+        'Timestamp', 'Phone Number', 'UTM Source', 'UTM Medium', 
+        'UTM Campaign', 'UTM Content', 'Placement', 'Engaged', 
+        'Engaged At', 'Attribution Source', 'Contact ID', 
+        'Conversation ID', 'Contact Name', 'Last Message'
       ];
-      
+
       if (!sheetsData.values || !sheetsData.values[0]) {
-        // Sheet is empty, add headers
+        // Create headers if sheet is empty
         await sheetsClient.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
           range: `${SHEET_NAME}!A1:N1`,
           valueInputOption: 'RAW',
-          requestBody: { values: [expectedHeaders] }
+          requestBody: { values: [requiredHeaders] }
         });
-        console.log('✅ Added header row to empty sheet');
-      } else {
-        console.log('Existing headers:', JSON.stringify(sheetsData.values[0]));
-        console.log('Expected headers:', JSON.stringify(expectedHeaders));
+        console.log('✅ Created header row');
       }
 
+      // Get documents to sync
       const snapshot = await db.collection('utmClicks')
         .where('hasEngaged', '==', true)
         .where('syncedToSheets', '==', false)
@@ -184,11 +167,10 @@ async function syncToSheets() {
 
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
-      
-      // Batch update operations for better reliability
+
+      // Batch update Firestore documents
       const batch = db.batch();
       const updateTime = admin.firestore.FieldValue.serverTimestamp();
-      
       snapshot.docs.forEach(doc => {
         batch.update(doc.ref, {
           syncedToSheets: true,
@@ -196,24 +178,26 @@ async function syncToSheets() {
         });
       });
 
-      // Add debug logs for row data
-      console.log(`Sending ${rows.length} rows to Google Sheets`);
-      console.log('First row sample:', JSON.stringify(rows[0]));
+      // Calculate update range
+      const currentRowCount = sheetsData.values ? sheetsData.values.length : 0;
+      const startRow = currentRowCount + 1;
+      const endRow = startRow + rows.length - 1;
+      const updateRange = `${SHEET_NAME}!A${startRow}:N${endRow}`;
+
+      console.log(`✍️ Writing to range: ${updateRange}`);
       
-      // Use update instead of append for more reliable insertion
-      const rowsRange = `${SHEET_NAME}!A${sheetsData.values.length + 1}:N${sheetsData.values.length + rows.length}`;
-      console.log(`Writing to range: ${rowsRange}`);
-      
+      // Update Google Sheets
       const updateResponse = await sheetsClient.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
-        range: rowsRange,
+        range: updateRange,
         valueInputOption: 'USER_ENTERED',
+        includeValuesInResponse: true,
         requestBody: { values: rows }
       });
 
       await batch.commit();
-      console.log('✅ Sync completed successfully');
-      console.log('📝 Updated range:', updateResponse.data.updatedRange);
+      console.log('✅ Firestore batch committed');
+      console.log('📝 Sheets update response:', JSON.stringify(updateResponse.data, null, 2));
       
       return { 
         count: rows.length,
