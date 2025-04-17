@@ -35,44 +35,93 @@ async function initializeSheetsClient() {
 function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
-    console.log('Processing document:', JSON.stringify(data, null, 2));
+    console.log('Processing document ID:', doc.id);
     
-    // Helper function for safe nested property access
-    const safeGet = (obj, path, defaultValue = 'N/A') => {
-      if (!obj) return defaultValue;
-      
-      try {
-        const parts = Array.isArray(path) ? path : path.split('.');
-        let current = obj;
-        
-        for (const part of parts) {
-          if (current[part] === undefined || current[part] === null) {
-            return defaultValue;
+    // IMPROVED: Enhanced path checking for multiple levels of nesting
+    const getNestedValue = (data, possiblePaths, defaultValue) => {
+      // Try each possible path in order of priority
+      for (const path of possiblePaths) {
+        try {
+          let value = data;
+          const parts = path.split('.');
+          
+          for (const part of parts) {
+            if (value === undefined || value === null || typeof value !== 'object') {
+              value = undefined;
+              break;
+            }
+            value = value[part];
           }
-          current = current[part];
+          
+          if (value !== undefined && value !== null && value !== '') {
+            console.log(`✅ Found value using path ${path}: ${value}`);
+            return value;
+          }
+        } catch (err) {
+          console.log(`❌ Path ${path} failed: ${err.message}`);
         }
-        return current;
-      } catch (err) {
-        console.error(`Error accessing ${path}:`, err);
-        return defaultValue;
       }
+      console.log(`⚠️ Using default value for ${possiblePaths[0]}: ${defaultValue}`);
+      return defaultValue;
     };
     
-    // Extract timestamps
-    const timestamp = data.click_time?.toDate?.() || data.timestamp?.toDate?.() || new Date();
-    const engagedTimestamp = data.engagedAt?.toDate?.()?.toISOString() || 
-                           (data.engagedAt instanceof Date ? data.engagedAt.toISOString() : 'N/A');
+    // Extract timestamp with fallbacks
+    let timestamp;
+    if (data.click_time && typeof data.click_time.toDate === 'function') {
+      timestamp = data.click_time.toDate();
+    } else if (data.timestamp && typeof data.timestamp.toDate === 'function') {
+      timestamp = data.timestamp.toDate();
+    } else {
+      timestamp = new Date();
+    }
     
-    // Extract parameters with precedence
-    const originalParams = data.original_params || {};
+    // Extract engagement timestamp
+    let engagedTimestamp = 'N/A';
+    if (data.engagedAt) {
+      if (typeof data.engagedAt.toDate === 'function') {
+        engagedTimestamp = data.engagedAt.toDate().toISOString();
+      } else if (data.engagedAt instanceof Date) {
+        engagedTimestamp = data.engagedAt.toISOString();
+      }
+    }
+    
+    // IMPROVED: Check multiple possible paths for each field with different naming conventions
     return [
       timestamp.toISOString(),
       data.phoneNumber || 'N/A',
-      safeGet(originalParams, 'source', data.source || 'direct'),
-      safeGet(originalParams, 'medium', data.medium || 'organic'),
-      safeGet(originalParams, 'campaign', data.campaign || 'none'),
-      safeGet(originalParams, 'content', data.content || 'none'),
-      safeGet(originalParams, 'placement', data.placement || 'N/A'),
+      getNestedValue(data, [
+        'original_params.campaign_source',
+        'original_params.original_params.campaign_source',
+        'source'
+      ], 'direct'),
+      
+      getNestedValue(data, [
+        'original_params.medium',
+        'original_params.adset_name',
+        'original_params.original_params.adset_name',
+        'medium'
+      ], 'organic'),
+      
+      getNestedValue(data, [
+        'original_params.campaign',
+        'original_params.campaign_name',
+        'original_params.original_params.campaign_name',
+        'campaign'
+      ], 'none'),
+      
+      getNestedValue(data, [
+        'original_params.content',
+        'original_params.ad_name',
+        'original_params.original_params.ad_name',
+        'content'
+      ], 'none'),
+      
+      getNestedValue(data, [
+        'original_params.placement',
+        'original_params.original_params.placement',
+        'placement'
+      ], 'N/A'),
+      
       data.hasEngaged ? '✅ YES' : '❌ NO',
       engagedTimestamp,
       data.attribution_source || 'unknown',
