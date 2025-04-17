@@ -121,13 +121,38 @@ async function syncToSheets() {
     try {
       const sheetsClient = await initializeSheetsClient();
       
-      // Get spreadsheet metadata
+      // 1. Get spreadsheet metadata and verify sheet exists
       const { data: spreadsheet } = await sheetsClient.spreadsheets.get({
-        spreadsheetId: SPREADSHEET_ID
+        spreadsheetId: SPREADSHEET_ID,
+        includeGridData: false
       });
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
-
-      // Verify headers
+      
+      // 2. Check if sheet exists
+      let sheetExists = spreadsheet.sheets.some(s => s.properties.title === SHEET_NAME);
+      
+      // 3. Create sheet if it doesn't exist
+      if (!sheetExists) {
+        console.log(`📄 Creating new sheet: ${SHEET_NAME}`);
+        await sheetsClient.spreadsheets.batchUpdate({
+          spreadsheetId: SPREADSHEET_ID,
+          resource: {
+            requests: [{
+              addSheet: {
+                properties: {
+                  title: SHEET_NAME,
+                  gridProperties: {
+                    rowCount: 1000,
+                    columnCount: 14
+                  }
+                }
+              }
+            }]
+          }
+        });
+      }
+      
+      // 4. Now handle headers
       const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A1:N1`
@@ -141,12 +166,12 @@ async function syncToSheets() {
       ];
 
       if (!sheetsData.values || !sheetsData.values[0]) {
-        // Create headers if sheet is empty
+        console.log('⏳ Setting up headers');
         await sheetsClient.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
           range: `${SHEET_NAME}!A1:N1`,
           valueInputOption: 'RAW',
-          resource: { values: [requiredHeaders] } // FIXED: Using 'resource' instead of 'requestBody'
+          resource: { values: [requiredHeaders] }
         });
         console.log('✅ Created header row');
       }
@@ -183,7 +208,7 @@ async function syncToSheets() {
         range: `${SHEET_NAME}!A:N`,
         valueInputOption: 'USER_ENTERED',
         insertDataOption: 'INSERT_ROWS',
-        resource: { values: rows } // FIXED: Using 'resource' instead of 'requestBody'
+        resource: { values: rows }
       });
 
       await batch.commit();
