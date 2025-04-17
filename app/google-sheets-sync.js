@@ -39,9 +39,9 @@ function convertToSheetRows(docs) {
     
     // Extract timestamps with proper handling
     let timestamp;
-    if (data.click_time?.toDate) {
+    if (data.click_time && typeof data.click_time.toDate === 'function') {
       timestamp = data.click_time.toDate();
-    } else if (data.timestamp?.toDate) {
+    } else if (data.timestamp && typeof data.timestamp.toDate === 'function') {
       timestamp = data.timestamp.toDate();
     } else {
       timestamp = new Date();
@@ -50,7 +50,7 @@ function convertToSheetRows(docs) {
     // Extract engagement timestamp
     let engagedTimestamp = 'N/A';
     if (data.engagedAt) {
-      if (data.engagedAt?.toDate) {
+      if (typeof data.engagedAt.toDate === 'function') {
         engagedTimestamp = data.engagedAt.toDate().toISOString();
       } else if (data.engagedAt instanceof Date) {
         engagedTimestamp = data.engagedAt.toISOString();
@@ -105,7 +105,6 @@ function convertToSheetRows(docs) {
       data.lastMessage ? data.lastMessage.substring(0, 150).replace(/\n/g, ' ') : 'No text content'
     ];
 
-    console.log('Row values to be inserted:', JSON.stringify(rowValues, null, 2));
     return rowValues;
   });
 }
@@ -147,7 +146,7 @@ async function syncToSheets() {
           spreadsheetId: SPREADSHEET_ID,
           range: `${SHEET_NAME}!A1:N1`,
           valueInputOption: 'RAW',
-          requestBody: { values: [requiredHeaders] }
+          resource: { values: [requiredHeaders] } // FIXED: Using 'resource' instead of 'requestBody'
         });
         console.log('✅ Created header row');
       }
@@ -178,26 +177,18 @@ async function syncToSheets() {
         });
       });
 
-      // Calculate update range
-      const currentRowCount = sheetsData.values ? sheetsData.values.length : 0;
-      const startRow = currentRowCount + 1;
-      const endRow = startRow + rows.length - 1;
-      const updateRange = `${SHEET_NAME}!A${startRow}:N${endRow}`;
-
-      console.log(`✍️ Writing to range: ${updateRange}`);
-      
-      // Update Google Sheets
-      const updateResponse = await sheetsClient.spreadsheets.values.update({
+      // FIXED: Use append instead of update for more reliable insertion
+      const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: updateRange,
+        range: `${SHEET_NAME}!A:N`,
         valueInputOption: 'USER_ENTERED',
-        includeValuesInResponse: true,
-        requestBody: { values: rows }
+        insertDataOption: 'INSERT_ROWS',
+        resource: { values: rows } // FIXED: Using 'resource' instead of 'requestBody'
       });
 
       await batch.commit();
       console.log('✅ Firestore batch committed');
-      console.log('📝 Sheets update response:', JSON.stringify(updateResponse.data, null, 2));
+      console.log('📝 Sheets append response:', JSON.stringify(appendResponse.data, null, 2));
       
       return { 
         count: rows.length,
