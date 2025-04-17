@@ -194,11 +194,13 @@ async function syncToSheets() {
 
       // Batch update Firestore documents
       const batch = db.batch();
-      const updateTime = admin.firestore.FieldValue.serverTimestamp();
+      
+      // FIX: Use the proper Firestore field value syntax based on the initialized client
       snapshot.docs.forEach(doc => {
         batch.update(doc.ref, {
           syncedToSheets: true,
-          lastSynced: updateTime
+          // Use Firestore's serverTimestamp method directly
+          lastSynced: db.Timestamp.now()
         });
       });
 
