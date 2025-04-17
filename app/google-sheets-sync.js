@@ -1,7 +1,7 @@
 const { Firestore } = require('@google-cloud/firestore');
 const { GoogleAuth } = require('google-auth-library');
 const { sheets } = require('@googleapis/sheets');
-const admin = require('firebase-admin'); // Added missing admin import
+const admin = require('firebase-admin'); 
 require('dotenv').config();
 const fs = require('fs');
 
@@ -32,16 +32,22 @@ async function initializeSheetsClient() {
   }
 }
 
+// MODIFIED to include the new 'placement' field and handle both old and new UTM formats
 function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
+    
+    // Get timestamp from either click_time or timestamp field
+    const timestamp = data.click_time?.toDate?.() || data.timestamp?.toDate?.() || new Date();
+    
     return [
-      data.click_time?.toDate().toISOString() || new Date().toISOString(),
+      timestamp.toISOString(),
       data.phoneNumber || 'N/A',
       data.source || 'direct',
       data.medium || 'organic',
       data.campaign || 'none',
       data.content || 'none',
+      data.placement || 'N/A', // Added new placement field
       data.hasEngaged ? '✅ YES' : '❌ NO',
       data.engagedAt?.toDate ? data.engagedAt.toDate().toISOString() : 
       data.engagedAt instanceof Date ? data.engagedAt.toISOString() : 
@@ -54,7 +60,6 @@ function convertToSheetRows(docs) {
     ];
   });
 }
-
 
 async function syncToSheets() {
   const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
@@ -72,6 +77,41 @@ async function syncToSheets() {
         spreadsheetId: SPREADSHEET_ID
       });
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
+
+      // Get Google Sheets structure to check for header row
+      const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A1:N1`, // Check header row
+      });
+      
+      // If sheet is empty or needs header row update, add it
+      if (!sheetsData.values || !sheetsData.values[0] || sheetsData.values[0].length < 14) {
+        const headers = [
+          'Timestamp',
+          'Phone Number',
+          'Source',
+          'Medium',
+          'Campaign',
+          'Content',
+          'Placement', // New column for placement
+          'Engaged',
+          'Engaged At',
+          'Attribution',
+          'Contact ID',
+          'Conversation ID',
+          'Contact Name',
+          'Last Message'
+        ];
+        
+        await sheetsClient.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `${SHEET_NAME}!A1:N1`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [headers] }
+        });
+        
+        console.log('✅ Updated sheet headers with new placement column');
+      }
 
       const snapshot = await db.collection('utmClicks')
         .where('hasEngaged', '==', true)
@@ -98,10 +138,10 @@ async function syncToSheets() {
         });
       });
 
-      // Modified range to include all columns
+      // Modified range to include the new placement column
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:M`, // Changed from A1 to A:M
+        range: `${SHEET_NAME}!A:N`, // Changed from A:M to A:N to include placement
         valueInputOption: 'USER_ENTERED',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: rows }
