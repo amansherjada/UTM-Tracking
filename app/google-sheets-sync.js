@@ -32,93 +32,54 @@ async function initializeSheetsClient() {
   }
 }
 
-// COMPLETELY REWRITTEN: Fixed nested object extraction with proper Firestore handling
 function convertToSheetRows(docs) {
   return docs.map(doc => {
-    // Get raw data and create JavaScript object
-    const rawData = doc.data();
-    console.log('Raw document data:', JSON.stringify(rawData, null, 2));
+    const data = doc.data();
+    console.log('Processing document:', JSON.stringify(data, null, 2));
     
-    // Safe access function to handle potential undefined properties
+    // Helper function for safe nested property access
     const safeGet = (obj, path, defaultValue = 'N/A') => {
       if (!obj) return defaultValue;
       
-      const parts = path.split('.');
-      let current = obj;
-      
-      for (const part of parts) {
-        if (current[part] === undefined || current[part] === null) {
-          return defaultValue;
+      try {
+        const parts = Array.isArray(path) ? path : path.split('.');
+        let current = obj;
+        
+        for (const part of parts) {
+          if (current[part] === undefined || current[part] === null) {
+            return defaultValue;
+          }
+          current = current[part];
         }
-        current = current[part];
+        return current;
+      } catch (err) {
+        console.error(`Error accessing ${path}:`, err);
+        return defaultValue;
       }
-      
-      return current;
     };
     
-    // Get timestamp with fallbacks
-    let timestamp;
-    if (rawData.click_time && typeof rawData.click_time.toDate === 'function') {
-      timestamp = rawData.click_time.toDate();
-    } else if (rawData.timestamp && typeof rawData.timestamp.toDate === 'function') {
-      timestamp = rawData.timestamp.toDate();
-    } else {
-      timestamp = new Date();
-    }
+    // Extract timestamps
+    const timestamp = data.click_time?.toDate?.() || data.timestamp?.toDate?.() || new Date();
+    const engagedTimestamp = data.engagedAt?.toDate?.()?.toISOString() || 
+                           (data.engagedAt instanceof Date ? data.engagedAt.toISOString() : 'N/A');
     
-    // Extract engaged timestamp with fallbacks
-    let engagedTimestamp = 'N/A';
-    if (rawData.engagedAt) {
-      if (typeof rawData.engagedAt.toDate === 'function') {
-        engagedTimestamp = rawData.engagedAt.toDate().toISOString();
-      } else if (rawData.engagedAt instanceof Date) {
-        engagedTimestamp = rawData.engagedAt.toISOString();
-      }
-    }
-    
-    // Check if original_params exists and is not null/undefined
-    let campaignValue = 'none';
-    let contentValue = 'none';
-    
-    // Explicitly check for original_params and its properties
-    if (rawData.original_params) {
-      console.log('Found original_params:', JSON.stringify(rawData.original_params, null, 2));
-      
-      // Try to access the campaign property
-      if (rawData.original_params.campaign) {
-        campaignValue = rawData.original_params.campaign;
-        console.log('Using campaign from original_params:', campaignValue);
-      }
-      
-      // Try to access the content property (if it exists)
-      if (rawData.original_params.content) {
-        contentValue = rawData.original_params.content;
-      } else if (rawData.original_params.ad_name) {
-        // Try alternative name for content
-        contentValue = rawData.original_params.ad_name;
-      }
-    } else {
-      console.log('original_params not found or is null/undefined');
-      campaignValue = rawData.campaign || 'none';
-      contentValue = rawData.content || 'none';
-    }
-    
-    // Prepare the row data with explicit type checking and conversions
+    // Extract parameters with precedence
+    const originalParams = data.original_params || {};
     return [
       timestamp.toISOString(),
-      rawData.phoneNumber || 'N/A',
-      rawData.source || 'direct',
-      rawData.medium || 'organic',
-      campaignValue,  // Use extracted campaign value
-      contentValue,   // Use extracted content value
-      rawData.placement || 'N/A',
-      rawData.hasEngaged === true ? '✅ YES' : '❌ NO',
+      data.phoneNumber || 'N/A',
+      safeGet(originalParams, 'source', data.source || 'direct'),
+      safeGet(originalParams, 'medium', data.medium || 'organic'),
+      safeGet(originalParams, 'campaign', data.campaign || 'none'),
+      safeGet(originalParams, 'content', data.content || 'none'),
+      safeGet(originalParams, 'placement', data.placement || 'N/A'),
+      data.hasEngaged ? '✅ YES' : '❌ NO',
       engagedTimestamp,
-      rawData.attribution_source || 'unknown',
-      rawData.contactId || 'N/A',
-      rawData.conversationId || 'N/A',
-      rawData.contactName || 'Anonymous',
-      rawData.lastMessage ? rawData.lastMessage.substring(0, 150).replace(/\n/g, ' ') : ''
+      data.attribution_source || 'unknown',
+      data.contactId || 'N/A',
+      data.conversationId || 'N/A',
+      data.contactName || 'Anonymous',
+      data.lastMessage?.substring(0, 150).replace(/\n/g, ' ') || ''
     ];
   });
 }
@@ -140,29 +101,17 @@ async function syncToSheets() {
       });
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
 
-      // Get Google Sheets structure to check for header row
+      // Verify/update headers
       const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A1:N1`, // Check header row
+        range: `${SHEET_NAME}!A1:N1`
       });
       
-      // If sheet is empty or needs header row update, add it
-      if (!sheetsData.values || !sheetsData.values[0] || sheetsData.values[0].length < 14) {
+      if (!sheetsData.values || sheetsData.values[0]?.length < 14) {
         const headers = [
-          'Timestamp',
-          'Phone Number',
-          'Source',
-          'Medium',
-          'Campaign',
-          'Content',
-          'Placement',
-          'Engaged',
-          'Engaged At',
-          'Attribution',
-          'Contact ID',
-          'Conversation ID',
-          'Contact Name',
-          'Last Message'
+          'Timestamp', 'Phone Number', 'Source', 'Medium', 'Campaign',
+          'Content', 'Placement', 'Engaged', 'Engaged At', 'Attribution',
+          'Contact ID', 'Conversation ID', 'Contact Name', 'Last Message'
         ];
         
         await sheetsClient.spreadsheets.values.update({
@@ -171,8 +120,7 @@ async function syncToSheets() {
           valueInputOption: 'RAW',
           requestBody: { values: [headers] }
         });
-        
-        console.log('✅ Updated sheet headers with new placement column');
+        console.log('✅ Updated sheet headers');
       }
 
       const snapshot = await db.collection('utmClicks')
@@ -188,10 +136,8 @@ async function syncToSheets() {
       }
 
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
-      
       const rows = convertToSheetRows(snapshot.docs);
-      console.log(`📊 Processing ${rows.length} records`);
-
+      
       const batch = db.batch();
       const updateTime = admin.firestore.FieldValue.serverTimestamp();
       
@@ -202,7 +148,6 @@ async function syncToSheets() {
         });
       });
 
-      // Modified range to include the new placement column
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A:N`,
