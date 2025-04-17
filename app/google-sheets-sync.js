@@ -32,28 +32,44 @@ async function initializeSheetsClient() {
   }
 }
 
+// MODIFIED: Enhanced function with better nested object handling
 function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
-    const originalParams = data.original_params || {};
+    
+    // Debug log to understand the exact structure
+    console.log('Processing document:', JSON.stringify(data, null, 2));
+    
+    // Extract nested original_params safely
+    let originalParams = {};
+    try {
+      // Handle different possible formats of original_params
+      if (data.original_params) {
+        originalParams = data.original_params;
+        console.log('Found original_params:', JSON.stringify(originalParams, null, 2));
+      }
+    } catch (err) {
+      console.error('Error processing original_params:', err.message);
+    }
     
     // Get timestamp from either click_time or timestamp field
     const timestamp = data.click_time?.toDate?.() || data.timestamp?.toDate?.() || new Date();
     
+    // Prepare the row data
     return [
       timestamp.toISOString(),
       data.phoneNumber || 'N/A',
       data.source || 'direct',
       data.medium || 'organic',
-      // Prioritize original_params campaign over top-level campaign
+      // FIXED: Correctly extract campaign from original_params
       originalParams.campaign || data.campaign || 'none',
-      // Prioritize original_params content over top-level content
-      originalParams.ad_name || data.content || 'none',
+      // FIXED: Use 'content' from original_params if it exists, otherwise the top-level value
+      originalParams.content || data.content || 'none',
+      // These values can be kept as is
       data.placement || 'N/A',
       data.hasEngaged ? '✅ YES' : '❌ NO',
       data.engagedAt?.toDate ? data.engagedAt.toDate().toISOString() : 
-      data.engagedAt instanceof Date ? data.engagedAt.toISOString() : 
-      'N/A',
+        data.engagedAt instanceof Date ? data.engagedAt.toISOString() : 'N/A',
       data.attribution_source || 'unknown',
       data.contactId || 'N/A',
       data.conversationId || 'N/A',
@@ -62,7 +78,6 @@ function convertToSheetRows(docs) {
     ];
   });
 }
-
 
 async function syncToSheets() {
   const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
@@ -96,7 +111,7 @@ async function syncToSheets() {
           'Medium',
           'Campaign',
           'Content',
-          'Placement', // New column for placement
+          'Placement',
           'Engaged',
           'Engaged At',
           'Attribution',
@@ -128,6 +143,8 @@ async function syncToSheets() {
         return { count: 0 };
       }
 
+      console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
+      
       const rows = convertToSheetRows(snapshot.docs);
       console.log(`📊 Processing ${rows.length} records`);
 
@@ -144,7 +161,7 @@ async function syncToSheets() {
       // Modified range to include the new placement column
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:N`, // Changed from A:M to A:N to include placement
+        range: `${SHEET_NAME}!A:N`,
         valueInputOption: 'USER_ENTERED',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: rows }
