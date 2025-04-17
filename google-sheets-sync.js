@@ -199,8 +199,7 @@ async function syncToSheets() {
       snapshot.docs.forEach(doc => {
         batch.update(doc.ref, {
           syncedToSheets: true,
-          // Use Firestore's serverTimestamp method directly
-          lastSynced: db.Timestamp.now()
+          lastSynced: admin.firestore.FieldValue.serverTimestamp()
         });
       });
 
