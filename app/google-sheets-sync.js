@@ -32,49 +32,93 @@ async function initializeSheetsClient() {
   }
 }
 
-// MODIFIED: Enhanced function with better nested object handling
+// COMPLETELY REWRITTEN: Fixed nested object extraction with proper Firestore handling
 function convertToSheetRows(docs) {
   return docs.map(doc => {
-    const data = doc.data();
+    // Get raw data and create JavaScript object
+    const rawData = doc.data();
+    console.log('Raw document data:', JSON.stringify(rawData, null, 2));
     
-    // Debug log to understand the exact structure
-    console.log('Processing document:', JSON.stringify(data, null, 2));
-    
-    // Extract nested original_params safely
-    let originalParams = {};
-    try {
-      // Handle different possible formats of original_params
-      if (data.original_params) {
-        originalParams = data.original_params;
-        console.log('Found original_params:', JSON.stringify(originalParams, null, 2));
+    // Safe access function to handle potential undefined properties
+    const safeGet = (obj, path, defaultValue = 'N/A') => {
+      if (!obj) return defaultValue;
+      
+      const parts = path.split('.');
+      let current = obj;
+      
+      for (const part of parts) {
+        if (current[part] === undefined || current[part] === null) {
+          return defaultValue;
+        }
+        current = current[part];
       }
-    } catch (err) {
-      console.error('Error processing original_params:', err.message);
+      
+      return current;
+    };
+    
+    // Get timestamp with fallbacks
+    let timestamp;
+    if (rawData.click_time && typeof rawData.click_time.toDate === 'function') {
+      timestamp = rawData.click_time.toDate();
+    } else if (rawData.timestamp && typeof rawData.timestamp.toDate === 'function') {
+      timestamp = rawData.timestamp.toDate();
+    } else {
+      timestamp = new Date();
     }
     
-    // Get timestamp from either click_time or timestamp field
-    const timestamp = data.click_time?.toDate?.() || data.timestamp?.toDate?.() || new Date();
+    // Extract engaged timestamp with fallbacks
+    let engagedTimestamp = 'N/A';
+    if (rawData.engagedAt) {
+      if (typeof rawData.engagedAt.toDate === 'function') {
+        engagedTimestamp = rawData.engagedAt.toDate().toISOString();
+      } else if (rawData.engagedAt instanceof Date) {
+        engagedTimestamp = rawData.engagedAt.toISOString();
+      }
+    }
     
-    // Prepare the row data
+    // Check if original_params exists and is not null/undefined
+    let campaignValue = 'none';
+    let contentValue = 'none';
+    
+    // Explicitly check for original_params and its properties
+    if (rawData.original_params) {
+      console.log('Found original_params:', JSON.stringify(rawData.original_params, null, 2));
+      
+      // Try to access the campaign property
+      if (rawData.original_params.campaign) {
+        campaignValue = rawData.original_params.campaign;
+        console.log('Using campaign from original_params:', campaignValue);
+      }
+      
+      // Try to access the content property (if it exists)
+      if (rawData.original_params.content) {
+        contentValue = rawData.original_params.content;
+      } else if (rawData.original_params.ad_name) {
+        // Try alternative name for content
+        contentValue = rawData.original_params.ad_name;
+      }
+    } else {
+      console.log('original_params not found or is null/undefined');
+      campaignValue = rawData.campaign || 'none';
+      contentValue = rawData.content || 'none';
+    }
+    
+    // Prepare the row data with explicit type checking and conversions
     return [
       timestamp.toISOString(),
-      data.phoneNumber || 'N/A',
-      data.source || 'direct',
-      data.medium || 'organic',
-      // FIXED: Correctly extract campaign from original_params
-      originalParams.campaign || data.campaign || 'none',
-      // FIXED: Use 'content' from original_params if it exists, otherwise the top-level value
-      originalParams.content || data.content || 'none',
-      // These values can be kept as is
-      data.placement || 'N/A',
-      data.hasEngaged ? '✅ YES' : '❌ NO',
-      data.engagedAt?.toDate ? data.engagedAt.toDate().toISOString() : 
-        data.engagedAt instanceof Date ? data.engagedAt.toISOString() : 'N/A',
-      data.attribution_source || 'unknown',
-      data.contactId || 'N/A',
-      data.conversationId || 'N/A',
-      data.contactName || 'Anonymous',
-      data.lastMessage?.substring(0, 150).replace(/\n/g, ' ') || ''
+      rawData.phoneNumber || 'N/A',
+      rawData.source || 'direct',
+      rawData.medium || 'organic',
+      campaignValue,  // Use extracted campaign value
+      contentValue,   // Use extracted content value
+      rawData.placement || 'N/A',
+      rawData.hasEngaged === true ? '✅ YES' : '❌ NO',
+      engagedTimestamp,
+      rawData.attribution_source || 'unknown',
+      rawData.contactId || 'N/A',
+      rawData.conversationId || 'N/A',
+      rawData.contactName || 'Anonymous',
+      rawData.lastMessage ? rawData.lastMessage.substring(0, 150).replace(/\n/g, ' ') : ''
     ];
   });
 }
