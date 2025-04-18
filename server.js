@@ -167,12 +167,14 @@ setImmediate(async () => {
     app.post('/store-click', async (req, res) => {
       try {
         const { session_id, ...utmData } = req.body;
+        console.log('Received UTM data:', JSON.stringify(utmData));
         
         await db.runTransaction(async (transaction) => {
           const docRef = clicksCollection.doc(session_id);
           const doc = await transaction.get(docRef);
           
           if (!doc.exists) {
+            console.log('Creating new document for session:', session_id);
             transaction.set(docRef, {
               ...utmData,
               timestamp: FieldValue.serverTimestamp(),
@@ -184,10 +186,14 @@ setImmediate(async () => {
         
         res.status(201).json({ message: 'Click stored', session_id });
       } catch (err) {
-        console.error('Storage error:', err);
-        res.status(500).json({ error: 'Database operation failed' });
+        console.error('🔥 Storage error:', err); // Detailed error logging
+        res.status(500).json({ 
+          error: 'Database operation failed',
+          details: err.message // Return error details to client
+        });
       }
     });
+
 
     // Readiness check
     app.get('/readiness', async (req, res) => {
