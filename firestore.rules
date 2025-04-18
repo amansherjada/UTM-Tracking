@@ -1,16 +1,24 @@
-// firestore.rules
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Session tracking documents
     match /utmClicks/{sessionId} {
-      allow create: if request.time == request.resource.data.timestamp;
+      // Allow creation only with valid timestamp (5min window)
+      allow create: if 
+        request.time <= request.resource.data.timestamp + duration.value(5, 'm') &&
+        request.time >= request.resource.data.timestamp - duration.value(5, 'm');
+      
+      // Allow engagement marking only once
       allow update: if 
         request.resource.data.hasEngaged == true &&
         resource.data.hasEngaged == false;
     }
     
+    // Direct messages with TTL
     match /directMessages/{messageId} {
-      allow create;
+      allow create: if 
+        request.resource.data.timestamp is timestamp &&
+        request.time <= request.resource.data.timestamp + duration.value(24, 'h');
     }
   }
 }
