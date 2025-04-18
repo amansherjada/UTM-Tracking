@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const admin = require('firebase-admin');
+const { Firestore, FieldValue } = require('@google-cloud/firestore');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
 const crypto = require('crypto');
 const fs = require('fs/promises');
@@ -11,13 +11,13 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Immediate server startup with minimal configuration
+// Immediate server startup
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on port ${PORT}`);
   console.log('Immediate endpoints available: /health');
 });
 
-// Global error handling
+// Error handling
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', reason);
 });
@@ -31,17 +31,14 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-// Essential middleware
+// Middleware
 app.use(cors());
 app.use(helmet());
 app.use(express.json());
 
 // Health endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-  });
+  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 // Deferred initialization
@@ -49,20 +46,11 @@ setImmediate(async () => {
   try {
     console.log('Starting async initialization...');
 
-    // Load credentials
-    const credsPath = '/secrets/secrets';
-    const serviceAccount = JSON.parse(await fs.readFile(credsPath));
-    
-    // Initialize Firebase
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      databaseURL: `https://${process.env.GCP_PROJECT_ID}.firebaseio.com`,
-    });
-
-    const db = admin.firestore();
-    db.settings({ 
+    // Initialize Firestore
+    const db = new Firestore({
+      projectId: process.env.GCP_PROJECT_ID,
       databaseId: 'utm-tracker-db',
-      timeout: 10000,
+      keyFilename: '/secrets/secrets'
     });
 
     // Verify Firestore connection
@@ -79,12 +67,12 @@ setImmediate(async () => {
       }
     }
 
-    if (!firestoreConnected) {
-      throw new Error('Failed to connect to Firestore');
-    }
-
-    const clicksCollection = db.collection('utmClicks');
+    if (!firestoreConnected) throw new Error('Failed to connect to Firestore');
     console.log('Firestore connected successfully');
+
+    // Collections
+    const clicksCollection = db.collection('utmClicks');
+    const directMessagesCollection = db.collection('directMessages');
 
     // Secret management
     const secretCache = new Map();
@@ -102,9 +90,7 @@ setImmediate(async () => {
       try {
         const token = req.headers['x-gallabox-token'];
         const gallaboxToken = await getSecret('gallabox-token');
-        if (token !== gallaboxToken) {
-          return res.status(401).send('Invalid token');
-        }
+        if (token !== gallaboxToken) return res.status(401).send('Invalid token');
         next();
       } catch (error) {
         console.error('Token verification error:', error);
@@ -112,225 +98,69 @@ setImmediate(async () => {
       }
     };
 
-    // Enhanced Gallabox Webhook Handler
+    // Webhook handler with session-based attribution
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
         const event = req.body;
-        console.log('Incoming webhook payload:', JSON.stringify(event, null, 2));
-        
-        // Extract critical identifiers
-        const senderPhone = event.whatsapp?.from?.replace(/^0+/, '') || '';
-        const contactId = event.contactId || event.contact?.id || null;
-        const conversationId = event.conversationId || null;
-        const contactName = event.contact?.name || null;
-        const messageContent = event.whatsapp?.text?.body || 'No text content';
+        const senderPhone = event.request.data.whatsapp?.from;
+        const normalizedPhone = senderPhone ? senderPhone.replace(/^0+/, '91') : null;
 
-        // Phone number normalization
-        let normalizedPhone = senderPhone;
-        const countryCode = '91';
-        if (normalizedPhone && !normalizedPhone.startsWith(countryCode)) {
-          normalizedPhone = `${countryCode}${normalizedPhone}`;
-        }
-
-        if (!normalizedPhone) {
-          return res.status(400).json({ error: 'Missing phone number' });
-        }
+        if (!normalizedPhone) return res.status(400).json({ error: 'Missing phone number' });
 
         let sessionId;
-        let utmData = {
-          source: 'direct_message',
-          medium: 'whatsapp',
-          campaign: 'organic',
-          content: 'none'
-        };
-        let attribution = 'direct';
-        
-        // Matching Priority 1: Context Parameter
-        if (event.context) {
-          try {
-            const context = JSON.parse(Buffer.from(event.context, 'base64').toString());
-            if (context?.session_id) {
-              sessionId = context.session_id;
-              utmData = context;
-              attribution = 'context';
-              console.log(`Context match: ${sessionId}`);
-            }
-          } catch (err) {
-            console.warn('Invalid context format:', err);
-          }
-        }
+        const sessionIdsToCheck = [
+          event.request.data.conversationId,
+          normalizedPhone
+        ];
 
-        // Matching Priority 2: Gallabox Identifiers
-        if (!sessionId && (contactId || conversationId)) {
-          console.log(`Attempting Gallabox ID match - Contact: ${contactId}, Conversation: ${conversationId}`);
-          
-          const fiveMinutesAgo = admin.firestore.Timestamp.fromDate(
-            new Date(Date.now() - 5 * 60 * 1000)
-          );
-
-          const query = clicksCollection
-            .where('hasEngaged', '==', false)
-            .where('timestamp', '>=', fiveMinutesAgo)
-            .orderBy('timestamp', 'desc')
-            .limit(5);
-
-          const snapshot = await query.get();
-
-          if (!snapshot.empty) {
-            sessionId = snapshot.docs[0].id;
-            utmData = snapshot.docs[0].data();
-            attribution = 'gallabox_id_match';
-            console.log(`Matched with recent click: ${sessionId}`);
-
-            // Update click record with Gallabox IDs
-            await clicksCollection.doc(sessionId).update({
-              contactId,
-              conversationId,
-              contactName: contactName || null
-            });
-          }
-        }
-
-        // Matching Priority 3: Phone Number (if available in click records)
-        if (!sessionId) {
-          const phoneMatch = await clicksCollection
-            .where('phoneNumber', '==', normalizedPhone)
-            .where('hasEngaged', '==', false)
-            .orderBy('timestamp', 'desc')
-            .limit(1)
-            .get();
-
-          if (!phoneMatch.empty) {
-            sessionId = phoneMatch.docs[0].id;
-            utmData = phoneMatch.docs[0].data();
-            attribution = 'phone_match';
-            console.log(`Phone number match: ${sessionId}`);
-          }
-        }
-
-        // Start of Modified Direct Message Handling
-        if (!sessionId) {
-          if (conversationId) {
-            const existingDirectQuery = await clicksCollection
-              .where('conversationId', '==', conversationId)
-              .where('source', '==', 'direct_message')
-              .limit(1)
-              .get();
-
-            if (!existingDirectQuery.empty) {
-              sessionId = existingDirectQuery.docs[0].id;
-              attribution = 'existing_direct';
-              console.log(`Found existing direct conversation: ${conversationId}`);
-
-              await clicksCollection.doc(sessionId).update({
-                lastMessage: messageContent,
-                engagedAt: admin.firestore.FieldValue.serverTimestamp()
-              });
-            } else if (process.env.STORE_DIRECT_MESSAGES === 'true') {
-              sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-              attribution = 'new_direct';
-              console.log(`Creating new direct record: ${sessionId}`);
-              
-              await clicksCollection.doc(sessionId).set({
-                ...utmData,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                hasEngaged: true,
-                phoneNumber: normalizedPhone,
-                lastMessage: messageContent,
-                engagedAt: admin.firestore.FieldValue.serverTimestamp(),
-                syncedToSheets: false,
-                contactId,
-                conversationId,
-                contactName
-              });
-            } else {
-              console.log(`Skipping direct message from ${normalizedPhone}`);
-              attribution = 'ignored_direct';
-              sessionId = 'not_stored';
-            }
-          }
-        }
-        // End of Modified Direct Message Handling
-
-        // Update existing records
-        if (attribution !== 'new_direct' && sessionId !== 'not_stored') {
-          const updateData = {
-            hasEngaged: true,
-            phoneNumber: normalizedPhone,
-            engagedAt: admin.firestore.FieldValue.serverTimestamp(),
-            syncedToSheets: false,
-            attribution_source: attribution,
-            contactId,
-            conversationId,
-            ...(contactName && { contactName }),
-            ...(messageContent && { lastMessage: messageContent })
-          };
-
-          await db.runTransaction(async (transaction) => {
-            const docRef = clicksCollection.doc(sessionId);
+        await db.runTransaction(async (transaction) => {
+          // Check session sources
+          for (const sid of sessionIdsToCheck.filter(Boolean)) {
+            const docRef = clicksCollection.doc(sid);
             const doc = await transaction.get(docRef);
             
-            if (doc.exists) {
-              transaction.update(docRef, updateData);
-            } else {
-              transaction.set(docRef, {
-                ...utmData,
-                ...updateData,
-                timestamp: admin.firestore.FieldValue.serverTimestamp()
+            if (doc.exists && !doc.data().hasEngaged) {
+              sessionId = sid;
+              transaction.update(docRef, {
+                hasEngaged: true,
+                phoneNumber: normalizedPhone,
+                engagedAt: FieldValue.serverTimestamp(),
+                contactId: event.request.data.contactId,
+                conversationId: event.request.data.conversationId,
+                contactName: event.request.data.contact?.name,
+                lastMessage: event.request.data.whatsapp?.text?.body
               });
+              break;
             }
-          });
-        }
+          }
 
-        console.log(`Processed message from ${normalizedPhone} with attribution: ${attribution}`);
+          // Direct message fallback
+          if (!sessionId) {
+            const directRef = directMessagesCollection.doc();
+            transaction.set(directRef, {
+              phoneNumber: normalizedPhone,
+              message: event.request.data.whatsapp?.text?.body,
+              timestamp: FieldValue.serverTimestamp()
+            });
+          }
+        });
+
         res.status(200).json({ 
           status: 'processed',
-          sessionId,
-          source: utmData.source,
-          attribution
+          sessionId: sessionId || 'direct_message'
         });
 
       } catch (err) {
-        console.error('Webhook processing error:', err);
-        res.status(500).json({ 
-          error: 'Processing failed',
-          details: err.message
-        });
+        console.error('Webhook error:', err);
+        res.status(500).json({ error: err.message });
       }
     });
 
+    // Store click endpoint
     app.post('/store-click', async (req, res) => {
       try {
-        const { session_id, original_params, ...rawData } = req.body;
+        const { session_id, ...utmData } = req.body;
         
-        // Extract values with consistent naming
-        // Prioritize original_params if present, otherwise use top-level fields
-        const params = original_params || {};
-        
-        // Create standardized structure
-        const utmData = {
-          // Ensure top-level fields match the ones we extract in Google Sheets
-          source: params.source || rawData.source || 'facebook',
-          medium: params.medium || rawData.medium || 'fb_ads',
-          campaign: params.campaign || rawData.campaign || 'unknown',
-          content: params.content || rawData.content || 'unknown',
-          placement: params.placement || rawData.placement || 'unknown',
-          
-          // Store original parameters in a flat structure (no nesting)
-          original_params: {
-            ...params,
-            // Ensure these fields exist for backwards compatibility
-            campaign: params.campaign || rawData.campaign || 'unknown',
-            medium: params.medium || rawData.medium || 'fb_ads',
-            source: params.source || rawData.source || 'facebook',
-            content: params.content || rawData.content || 'unknown',
-            placement: params.placement || rawData.placement || 'unknown'
-          },
-          
-          // Add timestamp
-          click_time: admin.firestore.FieldValue.serverTimestamp()
-        };
-    
         await db.runTransaction(async (transaction) => {
           const docRef = clicksCollection.doc(session_id);
           const doc = await transaction.get(docRef);
@@ -338,41 +168,27 @@ setImmediate(async () => {
           if (!doc.exists) {
             transaction.set(docRef, {
               ...utmData,
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              timestamp: FieldValue.serverTimestamp(),
               hasEngaged: false,
               syncedToSheets: false
             });
           }
         });
         
-        res.status(201).json({ 
-          message: 'Click stored',
-          session_id: session_id
-        });
+        res.status(201).json({ message: 'Click stored', session_id });
       } catch (err) {
         console.error('Storage error:', err);
         res.status(500).json({ error: 'Database operation failed' });
       }
     });
 
-    // Readiness endpoint
+    // Readiness check
     app.get('/readiness', async (req, res) => {
       try {
         await db.listCollections();
         res.status(200).json({ status: 'ready' });
       } catch (err) {
         res.status(500).json({ error: 'Not ready' });
-      }
-    });
-
-    // Initialize Google Sheets sync
-    const { scheduledSync } = require('./google-sheets-sync');
-    app.post('/scheduled-sync', async (req, res) => {
-      try {
-        const result = await scheduledSync();
-        res.status(200).json(result);
-      } catch (err) {
-        res.status(500).json({ error: err.message });
       }
     });
 
