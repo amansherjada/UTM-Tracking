@@ -46,6 +46,13 @@ setImmediate(async () => {
   try {
     console.log('Starting async initialization...');
 
+    // Load cryptographic secret
+    let SESSION_SECRET;
+    const [secretVersion] = await secretClient.accessSecretVersion({
+      name: `projects/${process.env.GCP_PROJECT_ID}/secrets/SESSION_SECRET/versions/latest`
+    });
+    SESSION_SECRET = secretVersion.payload.data.toString('utf8');
+
     // Initialize Firestore
     const db = new Firestore({
       projectId: process.env.GCP_PROJECT_ID,
@@ -98,70 +105,107 @@ setImmediate(async () => {
       }
     };
 
-    // Webhook handler with session-based attribution (FIXED)
+    // Enhanced webhook handler with cryptographic verification
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
         const event = req.body;
-        
-        // Correct payload structure handling
         const messageData = event.data || event;
         const whatsappInfo = messageData.whatsapp || {};
+        const messageText = whatsappInfo.text?.body || '';
         const contactInfo = messageData.contact || {};
 
-        // Validate required fields
-        if (!messageData.conversationId || !contactInfo.id) {
-          return res.status(400).json({ error: 'Invalid message format' });
-        }
+        // Extract session token if present
+        const sessionMatch = messageText.match(/\[#([\w-]+):([\w=]+)\]/);
+        let verifiedSession = false;
 
-        const senderPhone = whatsappInfo.from;
-        const normalizedPhone = senderPhone ? senderPhone.replace(/^0+/, '91') : null;
+        if (sessionMatch) {
+          const [_, sessionId, receivedToken] = sessionMatch;
+          
+          // Verify HMAC signature
+          const encoder = new TextEncoder();
+          const secretKey = await crypto.subtle.importKey(
+            'raw',
+            encoder.encode(SESSION_SECRET),
+            { name: 'HMAC', hash: 'SHA-256' },
+            false,
+            ['verify']
+          );
+          
+          const isValid = await crypto.subtle.verify(
+            'HMAC',
+            secretKey,
+            Uint8Array.from(atob(receivedToken), c => c.charCodeAt(0)),
+            encoder.encode(sessionId)
+          );
 
-        if (!normalizedPhone) {
-          return res.status(400).json({ error: 'Missing phone number' });
-        }
-
-        let sessionId;
-        const sessionIdsToCheck = [
-          messageData.conversationId,
-          normalizedPhone
-        ];
-
-        await db.runTransaction(async (transaction) => {
-          // Check session sources
-          for (const sid of sessionIdsToCheck.filter(Boolean)) {
-            const docRef = clicksCollection.doc(sid);
-            const doc = await transaction.get(docRef);
+          if (isValid) {
+            const docRef = clicksCollection.doc(sessionId);
+            const doc = await docRef.get();
             
             if (doc.exists && !doc.data().hasEngaged) {
-              sessionId = sid;
-              transaction.update(docRef, {
-                hasEngaged: true,
-                phoneNumber: normalizedPhone,
-                engagedAt: FieldValue.serverTimestamp(),
-                contactId: contactInfo.id,
-                conversationId: messageData.conversationId,
-                contactName: contactInfo.name,
-                lastMessage: whatsappInfo.text?.body
+              await db.runTransaction(async (transaction) => {
+                transaction.update(docRef, {
+                  hasEngaged: true,
+                  phoneNumber: whatsappInfo.from,
+                  engagedAt: FieldValue.serverTimestamp(),
+                  contactId: contactInfo.id,
+                  conversationId: messageData.conversationId,
+                  contactName: contactInfo.name,
+                  lastMessage: messageText.replace(sessionMatch[0], '').trim()
+                });
               });
-              break;
+              verifiedSession = true;
+              return res.status(200).json({ 
+                status: 'verified',
+                sessionId: sessionId
+              });
             }
           }
+        }
 
-          // Direct message fallback
-          if (!sessionId) {
-            const directRef = directMessagesCollection.doc();
-            transaction.set(directRef, {
-              phoneNumber: normalizedPhone,
-              message: whatsappInfo.text?.body,
-              timestamp: FieldValue.serverTimestamp()
-            });
+        // Fallback matching for unsigned sessions
+        if (!verifiedSession) {
+          const senderPhone = whatsappInfo.from;
+          const normalizedPhone = senderPhone?.replace(/^0+/, '91') || null;
+
+          if (!normalizedPhone) {
+            return res.status(400).json({ error: 'Missing phone number' });
           }
-        });
 
-        res.status(200).json({ 
-          status: 'processed',
-          sessionId: sessionId || 'direct_message'
-        });
+          let sessionId = null;
+          
+          await db.runTransaction(async (transaction) => {
+            // Try phone-based matching
+            const phoneQuery = await clicksCollection
+              .where('phoneNumber', '==', normalizedPhone)
+              .where('hasEngaged', '==', false)
+              .orderBy('timestamp', 'desc')
+              .limit(1)
+              .get();
+
+            if (!phoneQuery.empty) {
+              sessionId = phoneQuery.docs[0].id;
+              transaction.update(clicksCollection.doc(sessionId), {
+                hasEngaged: true,
+                engagedAt: FieldValue.serverTimestamp(),
+                lastMessage: messageText
+              });
+            } else {
+              // Fallback to direct message
+              const directRef = directMessagesCollection.doc();
+              transaction.set(directRef, {
+                phoneNumber: normalizedPhone,
+                message: messageText,
+                timestamp: FieldValue.serverTimestamp()
+              });
+            }
+          });
+
+          return res.status(200).json({
+            status: verifiedSession ? 'verified' : 'fallback',
+            sessionId: sessionId || 'direct_message'
+          });
+        }
 
       } catch (err) {
         console.error('Webhook error:', err);
@@ -169,7 +213,7 @@ setImmediate(async () => {
       }
     });
 
-    // Store click endpoint (unchanged)
+    // Store click endpoint
     app.post('/store-click', async (req, res) => {
       try {
         const { session_id, ...utmData } = req.body;
@@ -195,7 +239,7 @@ setImmediate(async () => {
       }
     });
 
-    // Readiness check (unchanged)
+    // Readiness check
     app.get('/readiness', async (req, res) => {
       try {
         await db.listCollections();
