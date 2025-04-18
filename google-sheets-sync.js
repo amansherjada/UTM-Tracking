@@ -1,22 +1,22 @@
+const { Firestore } = require('@google-cloud/firestore');
 const { GoogleAuth } = require('google-auth-library');
 const { sheets } = require('@googleapis/sheets');
-const admin = require('firebase-admin'); 
+const admin = require('firebase-admin');
 require('dotenv').config();
 const fs = require('fs');
 
-// 🔐 Initialize Firebase Admin with Firestore
-const serviceAccount = JSON.parse(fs.readFileSync('/secrets/secrets.json', 'utf8'));
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  projectId: process.env.GCP_PROJECT_ID
+// Initialize Firestore
+const db = new Firestore({
+  projectId: process.env.GCP_PROJECT_ID,
+  databaseId: 'utm-tracker-db',
+  keyFilename: '/secrets/secrets'
 });
-const db = admin.firestore(); // ✅ Use this instead of new Firestore()
 
 // Initialize Google Sheets API client
 async function initializeSheetsClient() {
   try {
     const credentials = JSON.parse(fs.readFileSync('/secrets/secrets', 'utf8'));
-    
+
     const auth = new GoogleAuth({
       scopes: [
         'https://www.googleapis.com/auth/spreadsheets',
@@ -36,7 +36,7 @@ function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
     console.log('Processing document ID:', doc.id);
-    
+
     // Extract timestamps with proper handling
     let timestamp;
     if (data.click_time && typeof data.click_time.toDate === 'function') {
@@ -46,7 +46,7 @@ function convertToSheetRows(docs) {
     } else {
       timestamp = new Date();
     }
-    
+
     // Extract engagement timestamp
     let engagedTimestamp = 'N/A';
     if (data.engagedAt) {
@@ -56,52 +56,24 @@ function convertToSheetRows(docs) {
         engagedTimestamp = data.engagedAt.toISOString();
       }
     }
-    
+
     // Extract parameters with explicit precedence
     const originalParams = data.original_params || {};
-    
-    // Build the row with ALL fields mapped explicitly
+
     const rowValues = [
-      // 1. Timestamp
       timestamp.toISOString(),
-      
-      // 2. Phone Number
       data.phoneNumber || 'N/A',
-      
-      // 3. UTM Source
       originalParams.source || data.source || 'direct',
-      
-      // 4. UTM Medium
       originalParams.medium || data.medium || 'organic',
-      
-      // 5. UTM Campaign
       originalParams.campaign || data.campaign || 'none',
-      
-      // 6. UTM Content
       originalParams.content || data.content || 'none',
-      
-      // 7. Placement
       originalParams.placement || data.placement || 'N/A',
-      
-      // 8. Engaged
       data.hasEngaged ? '✅ YES' : '❌ NO',
-      
-      // 9. Engaged At
       engagedTimestamp,
-      
-      // 10. Attribution Source
       data.attribution_source || 'unknown',
-      
-      // 11. Contact ID
       data.contactId || 'N/A',
-      
-      // 12. Conversation ID
       data.conversationId || 'N/A',
-      
-      // 13. Contact Name
       data.contactName || 'Anonymous',
-      
-      // 14. Last Message
       data.lastMessage ? data.lastMessage.substring(0, 150).replace(/\n/g, ' ') : 'No text content'
     ];
 
@@ -120,7 +92,7 @@ async function syncToSheets() {
   while (attempt < MAX_RETRIES) {
     try {
       const sheetsClient = await initializeSheetsClient();
-      
+
       // 1. Get spreadsheet metadata and verify sheet exists
       const { data: spreadsheet } = await sheetsClient.spreadsheets.get({
         spreadsheetId: SPREADSHEET_ID,
@@ -130,8 +102,8 @@ async function syncToSheets() {
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
 
       // 2. Check if sheet exists
-      let sheetExists = spreadsheet.sheets?.some(s => s.properties?.title === SHEET_NAME);
-      
+      const sheetExists = spreadsheet.sheets?.some(s => s.properties?.title === SHEET_NAME);
+
       // 3. Create sheet if it doesn't exist
       if (!sheetExists) {
         console.log(`📄 Creating new sheet: ${SHEET_NAME}`);
@@ -160,9 +132,9 @@ async function syncToSheets() {
       });
 
       const requiredHeaders = [
-        'Timestamp', 'Phone Number', 'UTM Source', 'UTM Medium', 
-        'UTM Campaign', 'UTM Content', 'Placement', 'Engaged', 
-        'Engaged At', 'Attribution Source', 'Contact ID', 
+        'Timestamp', 'Phone Number', 'UTM Source', 'UTM Medium',
+        'UTM Campaign', 'UTM Content', 'Placement', 'Engaged',
+        'Engaged At', 'Attribution Source', 'Contact ID',
         'Conversation ID', 'Contact Name', 'Last Message'
       ];
 
@@ -176,7 +148,6 @@ async function syncToSheets() {
         });
       }
 
-      // Get documents to sync
       const snapshot = await db.collection('utmClicks')
         .where('hasEngaged', '==', true)
         .where('syncedToSheets', '==', false)
@@ -198,8 +169,7 @@ async function syncToSheets() {
           lastSynced: admin.firestore.FieldValue.serverTimestamp()
         });
       });
-      
-      // Append data to Google Sheets
+
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A:N`,
@@ -208,13 +178,12 @@ async function syncToSheets() {
         resource: { values: rows }
       });
 
-      // Process updates after sheets operation succeeds
       await Promise.all(updatePromises);
-      
+
       console.log('✅ Firestore documents updated');
       console.log('📝 Sheets update:', appendResponse.data.updates.updatedRange);
-      
-      return { 
+
+      return {
         count: rows.length,
         spreadsheetId: SPREADSHEET_ID,
         sheetName: SHEET_NAME
@@ -223,12 +192,12 @@ async function syncToSheets() {
     } catch (err) {
       attempt++;
       console.error(`❌ Attempt ${attempt} failed:`, err.message);
-      
+
       if (attempt >= MAX_RETRIES) {
         console.error('💥 Maximum retries exceeded');
         throw new Error(`Final sync failure: ${err.message}`);
       }
-      
+
       await new Promise(resolve => setTimeout(resolve, attempt * 2000));
     }
   }
@@ -236,7 +205,7 @@ async function syncToSheets() {
 
 async function scheduledSync() {
   const startTime = Date.now();
-  const result = { 
+  const result = {
     success: false,
     duration: 0,
     syncedCount: 0
