@@ -111,7 +111,7 @@ function convertToSheetRows(docs) {
 
 async function syncToSheets() {
   const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
-  const SHEET_NAME = 'UTM_Tracking';
+  const SHEET_NAME = 'Sheet1';
   const MAX_RETRIES = 3;
   let attempt = 0;
 
@@ -201,7 +201,7 @@ async function syncToSheets() {
 
       const updatePromises = snapshot.docs.map(doc => {
         return doc.ref.update({
-          syncedToSheets: true,
+          syncedTos: true,
           lastSynced: admin.firestore.FieldValue.serverTimestamp()
         });
       });
