@@ -5,7 +5,7 @@ require('dotenv').config();
 const fs = require('fs');
 
 // 🔐 Initialize Firebase Admin with Firestore
-const serviceAccount = require('/secrets/secrets');
+const serviceAccount = JSON.parse(fs.readFileSync('/secrets/secrets.json', 'utf8'));
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   projectId: process.env.GCP_PROJECT_ID
