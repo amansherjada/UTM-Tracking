@@ -1,0 +1,16 @@
+// firestore.rules
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /utmClicks/{sessionId} {
+      allow create: if request.time == request.resource.data.timestamp;
+      allow update: if 
+        request.resource.data.hasEngaged == true &&
+        resource.data.hasEngaged == false;
+    }
+    
+    match /directMessages/{messageId} {
+      allow create;
+    }
+  }
+}
