@@ -108,14 +108,21 @@ setImmediate(async () => {
     //
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
-        const { conversationId, contactId, whatsapp } = req.body.data;
-        const phone = whatsapp.from.replace(/^0+/, '91');
+        // Extract data from Gallabox payload structure
+        const event = req.body.request?.data || req.body;
+        const messageData = event.data || event;
         
-        // Atomic Transaction
+        // Safely extract nested properties with defaults
+        const whatsappInfo = messageData.whatsapp || {};
+        const contactInfo = messageData.contact || {};
+        const phone = whatsappInfo.from ? whatsappInfo.from.replace(/^0+/, '91') : null;
+    
+        if (!phone) return res.status(400).json({ error: 'Missing phone number' });
+    
         await db.runTransaction(async (transaction) => {
-          // 1. Try Conversation ID Match
-          if (conversationId) {
-            const convRef = db.collection('utmClicks').doc(`conv-${conversationId}`);
+          // 1. Try conversation ID match
+          if (messageData.conversationId) {
+            const convRef = clicksCollection.doc(`conv-${messageData.conversationId}`);
             const convDoc = await transaction.get(convRef);
             
             if (convDoc.exists) {
@@ -123,17 +130,18 @@ setImmediate(async () => {
                 hasEngaged: true,
                 engagedAt: FieldValue.serverTimestamp(),
                 phoneNumber: phone,
-                lastMessage: whatsapp.text.body
+                contactId: contactInfo.id,
+                lastMessage: whatsappInfo.text?.body
               });
               return res.json({ status: 'conversation_matched' });
             }
           }
     
-          // 2. Fallback: Contact ID + Phone Match
+          // 2. Fallback: Phone + Contact ID match
           const contactQuery = await transaction.get(
-            db.collection('utmClicks')
-              .where('contactId', '==', contactId)
+            clicksCollection
               .where('phoneNumber', '==', phone)
+              .where('contactId', '==', contactInfo.id)
               .limit(1)
           );
     
@@ -142,16 +150,16 @@ setImmediate(async () => {
             transaction.update(doc.ref, {
               hasEngaged: true,
               engagedAt: FieldValue.serverTimestamp(),
-              lastMessage: whatsapp.text.body
+              lastMessage: whatsappInfo.text?.body
             });
             return res.json({ status: 'contact_matched' });
           }
     
-          // 3. Final Fallback: Direct Message
-          const directRef = db.collection('directMessages').doc();
+          // 3. Direct message fallback
+          const directRef = directMessagesCollection.doc();
           transaction.set(directRef, {
             phoneNumber: phone,
-            message: whatsapp.text.body,
+            message: whatsappInfo.text?.body,
             timestamp: FieldValue.serverTimestamp()
           });
           return res.json({ status: 'direct_message' });
@@ -159,7 +167,10 @@ setImmediate(async () => {
     
       } catch (err) {
         console.error('Webhook error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ 
+          error: err.message,
+          receivedBody: req.body // For debugging
+        });
       }
     });
 
