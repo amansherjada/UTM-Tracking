@@ -1,16 +1,16 @@
-const { Firestore } = require('@google-cloud/firestore');
 const { GoogleAuth } = require('google-auth-library');
 const { sheets } = require('@googleapis/sheets');
 const admin = require('firebase-admin'); 
 require('dotenv').config();
 const fs = require('fs');
 
-// Initialize Firestore
-const db = new Firestore({
-  projectId: process.env.GCP_PROJECT_ID,
-  databaseId: 'utm-tracker-db',
-  keyFilename: '/secrets/secrets'
+// 🔐 Initialize Firebase Admin with Firestore
+const serviceAccount = require('/secrets/secrets');
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  projectId: process.env.GCP_PROJECT_ID
 });
+const db = admin.firestore(); // ✅ Use this instead of new Firestore()
 
 // Initialize Google Sheets API client
 async function initializeSheetsClient() {
@@ -192,16 +192,9 @@ async function syncToSheets() {
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
 
-      // const updatePromises = snapshot.docs.map(doc => {
-      //   return doc.ref.update(
-      //     'syncedToSheets', true,
-      //     'lastSynced', admin.firestore.FieldValue.serverTimestamp()
-      //   );
-      // });
-
       const updatePromises = snapshot.docs.map(doc => {
         return doc.ref.update({
-          syncedTos: true,
+          syncedToSheets: true,
           lastSynced: admin.firestore.FieldValue.serverTimestamp()
         });
       });
