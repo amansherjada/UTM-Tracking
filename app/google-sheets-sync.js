@@ -1,16 +1,16 @@
-const { Firestore } = require('@google-cloud/firestore');
 const { GoogleAuth } = require('google-auth-library');
 const { sheets } = require('@googleapis/sheets');
 const admin = require('firebase-admin'); 
 require('dotenv').config();
 const fs = require('fs');
 
-// Initialize Firestore
-const db = new Firestore({
-  projectId: process.env.GCP_PROJECT_ID,
-  databaseId: 'utm-tracker-db',
-  keyFilename: '/secrets/secrets'
+// 🔐 Initialize Firebase Admin with Firestore
+const serviceAccount = require('/secrets/secrets');
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  projectId: process.env.GCP_PROJECT_ID
 });
+const db = admin.firestore(); // ✅ Use this instead of new Firestore()
 
 // Initialize Google Sheets API client
 async function initializeSheetsClient() {
@@ -111,7 +111,7 @@ function convertToSheetRows(docs) {
 
 async function syncToSheets() {
   const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
-  const SHEET_NAME = 'UTM_Tracking';
+  const SHEET_NAME = 'Sheet1';
   const MAX_RETRIES = 3;
   let attempt = 0;
 
@@ -121,13 +121,39 @@ async function syncToSheets() {
     try {
       const sheetsClient = await initializeSheetsClient();
       
-      // Get spreadsheet metadata
+      // 1. Get spreadsheet metadata and verify sheet exists
       const { data: spreadsheet } = await sheetsClient.spreadsheets.get({
-        spreadsheetId: SPREADSHEET_ID
+        spreadsheetId: SPREADSHEET_ID,
+        includeGridData: false
       });
+
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
 
-      // Verify headers
+      // 2. Check if sheet exists
+      let sheetExists = spreadsheet.sheets?.some(s => s.properties?.title === SHEET_NAME);
+      
+      // 3. Create sheet if it doesn't exist
+      if (!sheetExists) {
+        console.log(`📄 Creating new sheet: ${SHEET_NAME}`);
+        await sheetsClient.spreadsheets.batchUpdate({
+          spreadsheetId: SPREADSHEET_ID,
+          resource: {
+            requests: [{
+              addSheet: {
+                properties: {
+                  title: SHEET_NAME,
+                  gridProperties: {
+                    rowCount: 1000,
+                    columnCount: 14
+                  }
+                }
+              }
+            }]
+          }
+        });
+      }
+
+      // 4. Now handle headers
       const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A1:N1`
@@ -141,14 +167,13 @@ async function syncToSheets() {
       ];
 
       if (!sheetsData.values || !sheetsData.values[0]) {
-        // Create headers if sheet is empty
+        console.log('⏳ Setting up headers');
         await sheetsClient.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
           range: `${SHEET_NAME}!A1:N1`,
           valueInputOption: 'RAW',
-          resource: { values: [requiredHeaders] } // FIXED: Using 'resource' instead of 'requestBody'
+          resource: { values: [requiredHeaders] }
         });
-        console.log('✅ Created header row');
       }
 
       // Get documents to sync
@@ -167,28 +192,27 @@ async function syncToSheets() {
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
 
-      // Batch update Firestore documents
-      const batch = db.batch();
-      const updateTime = admin.firestore.FieldValue.serverTimestamp();
-      snapshot.docs.forEach(doc => {
-        batch.update(doc.ref, {
+      const updatePromises = snapshot.docs.map(doc => {
+        return doc.ref.update({
           syncedToSheets: true,
-          lastSynced: updateTime
+          lastSynced: admin.firestore.FieldValue.serverTimestamp()
         });
       });
-
-      // FIXED: Use append instead of update for more reliable insertion
+      
+      // Append data to Google Sheets
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A:N`,
         valueInputOption: 'USER_ENTERED',
         insertDataOption: 'INSERT_ROWS',
-        resource: { values: rows } // FIXED: Using 'resource' instead of 'requestBody'
+        resource: { values: rows }
       });
 
-      await batch.commit();
-      console.log('✅ Firestore batch committed');
-      console.log('📝 Sheets append response:', JSON.stringify(appendResponse.data, null, 2));
+      // Process updates after sheets operation succeeds
+      await Promise.all(updatePromises);
+      
+      console.log('✅ Firestore documents updated');
+      console.log('📝 Sheets update:', appendResponse.data.updates.updatedRange);
       
       return { 
         count: rows.length,
