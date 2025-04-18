@@ -105,108 +105,58 @@ setImmediate(async () => {
       }
     };
 
-    // Enhanced webhook handler with cryptographic verification
+    //
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
-        const event = req.body;
-        const messageData = event.data || event;
-        const whatsappInfo = messageData.whatsapp || {};
-        const messageText = whatsappInfo.text?.body || '';
-        const contactInfo = messageData.contact || {};
-
-        // Extract session token if present
-        const sessionMatch = messageText.match(/\[#([\w-]+):([\w=]+)\]/);
-        let verifiedSession = false;
-
-        if (sessionMatch) {
-          const [_, sessionId, receivedToken] = sessionMatch;
-          
-          // Verify HMAC signature
-          const encoder = new TextEncoder();
-          const secretKey = await crypto.subtle.importKey(
-            'raw',
-            encoder.encode(SESSION_SECRET),
-            { name: 'HMAC', hash: 'SHA-256' },
-            false,
-            ['verify']
-          );
-          
-          const isValid = await crypto.subtle.verify(
-            'HMAC',
-            secretKey,
-            Uint8Array.from(atob(receivedToken), c => c.charCodeAt(0)),
-            encoder.encode(sessionId)
-          );
-
-          if (isValid) {
-            const docRef = clicksCollection.doc(sessionId);
-            const doc = await docRef.get();
+        const { conversationId, contactId, whatsapp } = req.body.data;
+        const phone = whatsapp.from.replace(/^0+/, '91');
+        
+        // Atomic Transaction
+        await db.runTransaction(async (transaction) => {
+          // 1. Try Conversation ID Match
+          if (conversationId) {
+            const convRef = db.collection('utmClicks').doc(`conv-${conversationId}`);
+            const convDoc = await transaction.get(convRef);
             
-            if (doc.exists && !doc.data().hasEngaged) {
-              await db.runTransaction(async (transaction) => {
-                transaction.update(docRef, {
-                  hasEngaged: true,
-                  phoneNumber: whatsappInfo.from,
-                  engagedAt: FieldValue.serverTimestamp(),
-                  contactId: contactInfo.id,
-                  conversationId: messageData.conversationId,
-                  contactName: contactInfo.name,
-                  lastMessage: messageText.replace(sessionMatch[0], '').trim()
-                });
-              });
-              verifiedSession = true;
-              return res.status(200).json({ 
-                status: 'verified',
-                sessionId: sessionId
-              });
-            }
-          }
-        }
-
-        // Fallback matching for unsigned sessions
-        if (!verifiedSession) {
-          const senderPhone = whatsappInfo.from;
-          const normalizedPhone = senderPhone?.replace(/^0+/, '91') || null;
-
-          if (!normalizedPhone) {
-            return res.status(400).json({ error: 'Missing phone number' });
-          }
-
-          let sessionId = null;
-          
-          await db.runTransaction(async (transaction) => {
-            // Try phone-based matching
-            const phoneQuery = await clicksCollection
-              .where('phoneNumber', '==', normalizedPhone)
-              .where('hasEngaged', '==', false)
-              .orderBy('timestamp', 'desc')
-              .limit(1)
-              .get();
-
-            if (!phoneQuery.empty) {
-              sessionId = phoneQuery.docs[0].id;
-              transaction.update(clicksCollection.doc(sessionId), {
+            if (convDoc.exists) {
+              transaction.update(convRef, {
                 hasEngaged: true,
                 engagedAt: FieldValue.serverTimestamp(),
-                lastMessage: messageText
+                phoneNumber: phone,
+                lastMessage: whatsapp.text.body
               });
-            } else {
-              // Fallback to direct message
-              const directRef = directMessagesCollection.doc();
-              transaction.set(directRef, {
-                phoneNumber: normalizedPhone,
-                message: messageText,
-                timestamp: FieldValue.serverTimestamp()
-              });
+              return res.json({ status: 'conversation_matched' });
             }
+          }
+    
+          // 2. Fallback: Contact ID + Phone Match
+          const contactQuery = await transaction.get(
+            db.collection('utmClicks')
+              .where('contactId', '==', contactId)
+              .where('phoneNumber', '==', phone)
+              .limit(1)
+          );
+    
+          if (!contactQuery.empty) {
+            const doc = contactQuery.docs[0];
+            transaction.update(doc.ref, {
+              hasEngaged: true,
+              engagedAt: FieldValue.serverTimestamp(),
+              lastMessage: whatsapp.text.body
+            });
+            return res.json({ status: 'contact_matched' });
+          }
+    
+          // 3. Final Fallback: Direct Message
+          const directRef = db.collection('directMessages').doc();
+          transaction.set(directRef, {
+            phoneNumber: phone,
+            message: whatsapp.text.body,
+            timestamp: FieldValue.serverTimestamp()
           });
-
-          return res.status(200).json({
-            status: verifiedSession ? 'verified' : 'fallback',
-            sessionId: sessionId || 'direct_message'
-          });
-        }
-
+          return res.json({ status: 'direct_message' });
+        });
+    
       } catch (err) {
         console.error('Webhook error:', err);
         res.status(500).json({ error: err.message });
