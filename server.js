@@ -98,18 +98,31 @@ setImmediate(async () => {
       }
     };
 
-    // Webhook handler with session-based attribution
+    // Webhook handler with session-based attribution (FIXED)
     app.post('/gallabox-webhook', verifyGallabox, async (req, res) => {
       try {
         const event = req.body;
-        const senderPhone = event.request.data.whatsapp?.from;
+        
+        // Correct payload structure handling
+        const messageData = event.data || event;
+        const whatsappInfo = messageData.whatsapp || {};
+        const contactInfo = messageData.contact || {};
+
+        // Validate required fields
+        if (!messageData.conversationId || !contactInfo.id) {
+          return res.status(400).json({ error: 'Invalid message format' });
+        }
+
+        const senderPhone = whatsappInfo.from;
         const normalizedPhone = senderPhone ? senderPhone.replace(/^0+/, '91') : null;
 
-        if (!normalizedPhone) return res.status(400).json({ error: 'Missing phone number' });
+        if (!normalizedPhone) {
+          return res.status(400).json({ error: 'Missing phone number' });
+        }
 
         let sessionId;
         const sessionIdsToCheck = [
-          event.request.data.conversationId,
+          messageData.conversationId,
           normalizedPhone
         ];
 
@@ -125,10 +138,10 @@ setImmediate(async () => {
                 hasEngaged: true,
                 phoneNumber: normalizedPhone,
                 engagedAt: FieldValue.serverTimestamp(),
-                contactId: event.request.data.contactId,
-                conversationId: event.request.data.conversationId,
-                contactName: event.request.data.contact?.name,
-                lastMessage: event.request.data.whatsapp?.text?.body
+                contactId: contactInfo.id,
+                conversationId: messageData.conversationId,
+                contactName: contactInfo.name,
+                lastMessage: whatsappInfo.text?.body
               });
               break;
             }
@@ -139,7 +152,7 @@ setImmediate(async () => {
             const directRef = directMessagesCollection.doc();
             transaction.set(directRef, {
               phoneNumber: normalizedPhone,
-              message: event.request.data.whatsapp?.text?.body,
+              message: whatsappInfo.text?.body,
               timestamp: FieldValue.serverTimestamp()
             });
           }
@@ -156,7 +169,7 @@ setImmediate(async () => {
       }
     });
 
-    // Store click endpoint
+    // Store click endpoint (unchanged)
     app.post('/store-click', async (req, res) => {
       try {
         const { session_id, ...utmData } = req.body;
@@ -182,7 +195,7 @@ setImmediate(async () => {
       }
     });
 
-    // Readiness check
+    // Readiness check (unchanged)
     app.get('/readiness', async (req, res) => {
       try {
         await db.listCollections();
