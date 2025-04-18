@@ -192,12 +192,18 @@ async function syncToSheets() {
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
 
-      // FIXED: Use field/value pairs syntax for update with serverTimestamp
+      // const updatePromises = snapshot.docs.map(doc => {
+      //   return doc.ref.update(
+      //     'syncedToSheets', true,
+      //     'lastSynced', admin.firestore.FieldValue.serverTimestamp()
+      //   );
+      // });
+
       const updatePromises = snapshot.docs.map(doc => {
-        return doc.ref.update(
-          'syncedToSheets', true,
-          'lastSynced', admin.firestore.FieldValue.serverTimestamp()
-        );
+        return doc.ref.update({
+          syncedToSheets: true,
+          lastSynced: admin.firestore.FieldValue.serverTimestamp()
+        });
       });
       
       // Append data to Google Sheets
