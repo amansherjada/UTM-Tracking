@@ -1,11 +1,10 @@
-const { Firestore } = require('@google-cloud/firestore');
+const { Firestore, FieldValue } = require('@google-cloud/firestore');
 const { GoogleAuth } = require('google-auth-library');
 const { sheets } = require('@googleapis/sheets');
-const admin = require('firebase-admin');
-require('dotenv').config();
 const fs = require('fs');
+require('dotenv').config();
 
-// Initialize Firestore
+// Initialize Firestore (using native GCP Firestore SDK)
 const db = new Firestore({
   projectId: process.env.GCP_PROJECT_ID,
   databaseId: 'utm-tracker-db',
@@ -163,10 +162,11 @@ async function syncToSheets() {
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
 
+      // 🔥 CRITICAL FIX: Use native Firestore FieldValue
       const updatePromises = snapshot.docs.map(doc => {
         return doc.ref.update({
           syncedToSheets: true,
-          lastSynced: admin.firestore.FieldValue.serverTimestamp()
+          lastSynced: FieldValue.serverTimestamp() // Fixed line
         });
       });
 
