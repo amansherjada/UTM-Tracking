@@ -4,7 +4,7 @@ const { sheets } = require('@googleapis/sheets');
 const fs = require('fs');
 require('dotenv').config();
 
-// Initialize Firestore
+// Initialize Firestore (using native GCP Firestore SDK)
 const db = new Firestore({
   projectId: process.env.GCP_PROJECT_ID,
   databaseId: 'utm-tracker-db',
@@ -31,33 +31,52 @@ async function initializeSheetsClient() {
   }
 }
 
-// Updated conversion function with session ID
 function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
     console.log('Processing document ID:', doc.id);
 
-    // Session-based timestamp handling
-    const timestamp = data.timestamp?.toDate?.() || new Date();
-    const engagedAt = data.engagedAt?.toDate?.() || 'N/A';
+    // Extract timestamps with proper handling
+    let timestamp;
+    if (data.click_time && typeof data.click_time.toDate === 'function') {
+      timestamp = data.click_time.toDate();
+    } else if (data.timestamp && typeof data.timestamp.toDate === 'function') {
+      timestamp = data.timestamp.toDate();
+    } else {
+      timestamp = new Date();
+    }
 
-    return [
-      doc.id, // Session ID as first column
+    // Extract engagement timestamp
+    let engagedTimestamp = 'N/A';
+    if (data.engagedAt) {
+      if (typeof data.engagedAt.toDate === 'function') {
+        engagedTimestamp = data.engagedAt.toDate().toISOString();
+      } else if (data.engagedAt instanceof Date) {
+        engagedTimestamp = data.engagedAt.toISOString();
+      }
+    }
+
+    // Extract parameters with explicit precedence
+    const originalParams = data.original_params || {};
+
+    const rowValues = [
       timestamp.toISOString(),
       data.phoneNumber || 'N/A',
-      data.source || 'direct',
-      data.medium || 'organic',
-      data.campaign || 'none',
-      data.content || 'none',
-      data.placement || 'N/A',
+      originalParams.source || data.source || 'direct',
+      originalParams.medium || data.medium || 'organic',
+      originalParams.campaign || data.campaign || 'none',
+      originalParams.content || data.content || 'none',
+      originalParams.placement || data.placement || 'N/A',
       data.hasEngaged ? '✅ YES' : '❌ NO',
-      engagedAt.toISOString(),
+      engagedTimestamp,
       data.attribution_source || 'unknown',
       data.contactId || 'N/A',
       data.conversationId || 'N/A',
       data.contactName || 'Anonymous',
-      data.lastMessage?.substring(0, 150).replace(/\n/g, ' ') || 'No text content'
+      data.lastMessage ? data.lastMessage.substring(0, 150).replace(/\n/g, ' ') : 'No text content'
     ];
+
+    return rowValues;
   });
 }
 
@@ -73,15 +92,18 @@ async function syncToSheets() {
     try {
       const sheetsClient = await initializeSheetsClient();
 
-      // 1. Spreadsheet setup
+      // 1. Get spreadsheet metadata and verify sheet exists
       const { data: spreadsheet } = await sheetsClient.spreadsheets.get({
         spreadsheetId: SPREADSHEET_ID,
         includeGridData: false
       });
+
       console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
 
-      // 2. Sheet creation if missing
+      // 2. Check if sheet exists
       const sheetExists = spreadsheet.sheets?.some(s => s.properties?.title === SHEET_NAME);
+
+      // 3. Create sheet if it doesn't exist
       if (!sheetExists) {
         console.log(`📄 Creating new sheet: ${SHEET_NAME}`);
         await sheetsClient.spreadsheets.batchUpdate({
@@ -91,7 +113,10 @@ async function syncToSheets() {
               addSheet: {
                 properties: {
                   title: SHEET_NAME,
-                  gridProperties: { rowCount: 1000, columnCount: 15 } // Updated for 15 columns
+                  gridProperties: {
+                    rowCount: 1000,
+                    columnCount: 14
+                  }
                 }
               }
             }]
@@ -99,33 +124,33 @@ async function syncToSheets() {
         });
       }
 
-      // 3. Header management
-      const requiredHeaders = [
-        'Session ID', 'Timestamp', 'Phone Number', 'UTM Source',
-        'UTM Medium', 'UTM Campaign', 'UTM Content', 'Placement',
-        'Engaged', 'Engaged At', 'Attribution Source', 'Contact ID',
-        'Conversation ID', 'Contact Name', 'Last Message'
-      ];
-
+      // 4. Now handle headers
       const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A1:O1` // Updated range for 15 columns
+        range: `${SHEET_NAME}!A1:N1`
       });
+
+      const requiredHeaders = [
+        'Timestamp', 'Phone Number', 'UTM Source', 'UTM Medium',
+        'UTM Campaign', 'UTM Content', 'Placement', 'Engaged',
+        'Engaged At', 'Attribution Source', 'Contact ID',
+        'Conversation ID', 'Contact Name', 'Last Message'
+      ];
 
       if (!sheetsData.values || !sheetsData.values[0]) {
         console.log('⏳ Setting up headers');
         await sheetsClient.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
-          range: `${SHEET_NAME}!A1:O1`,
+          range: `${SHEET_NAME}!A1:N1`,
           valueInputOption: 'RAW',
           resource: { values: [requiredHeaders] }
         });
       }
 
-      // 4. Fetch and process documents
       const snapshot = await db.collection('utmClicks')
         .where('hasEngaged', '==', true)
         .where('syncedToSheets', '==', false)
+        .where('source', '!=', 'direct_message')
         .limit(250)
         .get();
 
@@ -137,18 +162,17 @@ async function syncToSheets() {
       console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
 
-      // 5. Atomic updates with transaction support
-      const updatePromises = snapshot.docs.map(doc => 
-        doc.ref.update({
+      // 🔥 CRITICAL FIX: Use native Firestore FieldValue
+      const updatePromises = snapshot.docs.map(doc => {
+        return doc.ref.update({
           syncedToSheets: true,
-          lastSynced: FieldValue.serverTimestamp()
-        })
-      );
+          lastSynced: FieldValue.serverTimestamp() // Fixed line
+        });
+      });
 
-      // 6. Append to sheet
       const appendResponse = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:O`, // Updated range
+        range: `${SHEET_NAME}!A:N`,
         valueInputOption: 'USER_ENTERED',
         insertDataOption: 'INSERT_ROWS',
         resource: { values: rows }
@@ -179,7 +203,6 @@ async function syncToSheets() {
   }
 }
 
-// Scheduled sync remains same
 async function scheduledSync() {
   const startTime = Date.now();
   const result = {
