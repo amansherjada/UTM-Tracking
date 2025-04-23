@@ -304,22 +304,18 @@ setImmediate(async () => {
         const { session_id, original_params, ...rawData } = req.body;
         
         // Extract values with consistent naming
-        // Prioritize original_params if present, otherwise use top-level fields
         const params = original_params || {};
         
         // Create standardized structure
         const utmData = {
-          // Ensure top-level fields match the ones we extract in Google Sheets
           source: params.source || rawData.source || 'facebook',
           medium: params.medium || rawData.medium || 'fb_ads',
           campaign: params.campaign || rawData.campaign || 'unknown',
           content: params.content || rawData.content || 'unknown',
           placement: params.placement || rawData.placement || 'unknown',
           
-          // Store original parameters in a flat structure (no nesting)
           original_params: {
             ...params,
-            // Ensure these fields exist for backwards compatibility
             campaign: params.campaign || rawData.campaign || 'unknown',
             medium: params.medium || rawData.medium || 'fb_ads',
             source: params.source || rawData.source || 'facebook',
@@ -327,10 +323,9 @@ setImmediate(async () => {
             placement: params.placement || rawData.placement || 'unknown'
           },
           
-          // Add timestamp
           click_time: admin.firestore.FieldValue.serverTimestamp()
         };
-    
+
         await db.runTransaction(async (transaction) => {
           const docRef = clicksCollection.doc(session_id);
           const doc = await transaction.get(docRef);
@@ -366,7 +361,9 @@ setImmediate(async () => {
     });
 
     // Initialize Google Sheets sync
-    const { scheduledSync } = require('./google-sheets-sync');
+    const { scheduledSync, setupRealtimeSync } = require('./google-sheets-sync');
+    
+    // Setup scheduled sync endpoint
     app.post('/scheduled-sync', async (req, res) => {
       try {
         const result = await scheduledSync();
@@ -374,6 +371,16 @@ setImmediate(async () => {
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
+    });
+    
+    // Initialize real-time sync listener
+    const unsubscribeSheetsSync = await setupRealtimeSync();
+    
+    // Cleanup on server shutdown
+    process.on('SIGTERM', () => {
+      console.log('Shutting down, cleaning up listeners...');
+      if (unsubscribeSheetsSync) unsubscribeSheetsSync();
+      server.close();
     });
 
     console.log('Async initialization completed');
