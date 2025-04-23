@@ -227,4 +227,89 @@ async function scheduledSync() {
   }
 }
 
-module.exports = { syncToSheets, scheduledSync };
+// In google-sheets-sync.js
+
+async function setupRealtimeSync() {
+    console.log('🔄 Setting up real-time Firestore to Sheets sync');
+    
+    try {
+      // Create a query for documents that need syncing
+      const query = db.collection('utmClicks')
+        .where('hasEngaged', '==', true)
+        .where('syncedToSheets', '==', false)
+        .where('source', '!=', 'direct_message');
+      
+      // Set up the listener with error handling
+      const unsubscribe = query.onSnapshot(async (snapshot) => {
+        try {
+          // Skip empty snapshots
+          if (snapshot.empty) {
+            return;
+          }
+          
+          // Get the modified or added documents
+          const docsToSync = [];
+          snapshot.docChanges().forEach((change) => {
+            // Only process new or modified documents
+            if (change.type === 'added' || change.type === 'modified') {
+              docsToSync.push(change.doc);
+            }
+          });
+          
+          if (docsToSync.length === 0) {
+            return;
+          }
+          
+          console.log(`🔥 Real-time sync triggered for ${docsToSync.length} documents`);
+          
+          // Initialize the sheets client
+          const sheetsClient = await initializeSheetsClient();
+          const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
+          const SHEET_NAME = 'Sheet1';
+          
+          // Convert the documents to sheet rows
+          const rows = convertToSheetRows(docsToSync);
+          
+          // First mark these documents as synced to prevent duplicate syncs
+          // This is important in case the sheets API call fails
+          const updatePromises = docsToSync.map(doc => {
+            return doc.ref.update({
+              syncedToSheets: true,
+              lastSynced: FieldValue.serverTimestamp()
+            });
+          });
+          
+          // Wait for all updates to complete
+          await Promise.all(updatePromises);
+          
+          // Now append the data to Google Sheets
+          const appendResponse = await sheetsClient.spreadsheets.values.append({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `${SHEET_NAME}!A:N`,
+            valueInputOption: 'USER_ENTERED',
+            insertDataOption: 'INSERT_ROWS',
+            resource: { values: rows }
+          });
+          
+          console.log('✅ Real-time sync completed');
+          console.log('📝 Sheets update:', appendResponse.data.updates.updatedRange);
+          
+        } catch (err) {
+          console.error('❌ Real-time sync error:', err);
+        }
+      }, (error) => {
+        console.error('🚨 Listener error:', error);
+        // Attempt to recreate the listener after a delay
+        setTimeout(() => setupRealtimeSync(), 60000);
+      });
+      
+      // Return the unsubscribe function to allow cleanup if needed
+      return unsubscribe;
+    } catch (err) {
+      console.error('💥 Failed to set up real-time sync:', err);
+      // Attempt to recreate the listener after a delay
+      setTimeout(() => setupRealtimeSync(), 60000);
+    }
+  }
+
+module.exports = { syncToSheets, scheduledSync, setupRealtimeSync  };
