@@ -6,18 +6,10 @@ const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const secretClient = new SecretManagerServiceClient();
-const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-
-// Rate limiting middleware
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100
-});
-app.use('/store-click', apiLimiter);
 
 // Immediate server startup with minimal configuration
 const server = app.listen(PORT, '0.0.0.0', () => {
@@ -92,13 +84,7 @@ setImmediate(async () => {
     }
 
     const clicksCollection = db.collection('utmClicks');
-    const alchemaneClicksCollection = db.collection('alchemaneutmClicks');
     console.log('Firestore connected successfully');
-
-    // Collection selector helper (hoisted)
-    function getCollectionForWebsite(website) {
-      return website === 'alchemane' ? alchemaneClicksCollection : clicksCollection;
-    }
 
     // Secret management
     const secretCache = new Map();
@@ -139,19 +125,15 @@ setImmediate(async () => {
         const contactName = event.contact?.name || null;
         const messageContent = event.whatsapp?.text?.body || 'No text content';
 
-        // Phone number normalization and validation
+        // Phone number normalization
         let normalizedPhone = senderPhone;
         const countryCode = '91';
         if (normalizedPhone && !normalizedPhone.startsWith(countryCode)) {
           normalizedPhone = `${countryCode}${normalizedPhone}`;
         }
 
-        // Phone validation
         if (!normalizedPhone) {
           return res.status(400).json({ error: 'Missing phone number' });
-        }
-        if (normalizedPhone.length !== 12 || !normalizedPhone.startsWith('91')) {
-          return res.status(400).json({ error: 'Invalid Indian phone number format' });
         }
 
         let sessionId;
@@ -162,9 +144,8 @@ setImmediate(async () => {
           content: 'none'
         };
         let attribution = 'direct';
-        let website = 'americanhairline';
         
-        // Context handling
+        // Matching Priority 1: Context Parameter
         if (event.context) {
           try {
             const context = JSON.parse(Buffer.from(event.context, 'base64').toString());
@@ -172,27 +153,22 @@ setImmediate(async () => {
               sessionId = context.session_id;
               utmData = context;
               attribution = 'context';
-              website = context.website || 'americanhairline';
-              console.log(`Context match: ${sessionId}, Website: ${website}`);
+              console.log(`Context match: ${sessionId}`);
             }
           } catch (err) {
             console.warn('Invalid context format:', err);
           }
         }
 
-        // Select collection with metrics
-        const targetCollection = getCollectionForWebsite(website);
-        console.log(`Routing to collection: ${targetCollection.path}`);
-
-        // Gallabox ID matching
+        // Matching Priority 2: Gallabox Identifiers
         if (!sessionId && (contactId || conversationId)) {
-          console.log(`Attempting Gallabox ID match for ${website}`);
+          console.log(`Attempting Gallabox ID match - Contact: ${contactId}, Conversation: ${conversationId}`);
           
           const fiveMinutesAgo = admin.firestore.Timestamp.fromDate(
             new Date(Date.now() - 5 * 60 * 1000)
           );
 
-          const query = targetCollection
+          const query = clicksCollection
             .where('hasEngaged', '==', false)
             .where('timestamp', '>=', fiveMinutesAgo)
             .orderBy('timestamp', 'desc')
@@ -204,9 +180,10 @@ setImmediate(async () => {
             sessionId = snapshot.docs[0].id;
             utmData = snapshot.docs[0].data();
             attribution = 'gallabox_id_match';
-            console.log(`Matched with recent click in ${website} collection: ${sessionId}`);
+            console.log(`Matched with recent click: ${sessionId}`);
 
-            await targetCollection.doc(sessionId).update({
+            // Update click record with Gallabox IDs
+            await clicksCollection.doc(sessionId).update({
               contactId,
               conversationId,
               contactName: contactName || null
@@ -214,9 +191,9 @@ setImmediate(async () => {
           }
         }
 
-        // Phone number matching
+        // Matching Priority 3: Phone Number (if available in click records)
         if (!sessionId) {
-          const phoneMatch = await targetCollection
+          const phoneMatch = await clicksCollection
             .where('phoneNumber', '==', normalizedPhone)
             .where('hasEngaged', '==', false)
             .orderBy('timestamp', 'desc')
@@ -227,14 +204,14 @@ setImmediate(async () => {
             sessionId = phoneMatch.docs[0].id;
             utmData = phoneMatch.docs[0].data();
             attribution = 'phone_match';
-            console.log(`Phone number match in ${website} collection: ${sessionId}`);
+            console.log(`Phone number match: ${sessionId}`);
           }
         }
 
-        // Direct message handling
+        // Start of Modified Direct Message Handling
         if (!sessionId) {
           if (conversationId) {
-            const existingDirectQuery = await targetCollection
+            const existingDirectQuery = await clicksCollection
               .where('conversationId', '==', conversationId)
               .where('source', '==', 'direct_message')
               .limit(1)
@@ -243,26 +220,19 @@ setImmediate(async () => {
             if (!existingDirectQuery.empty) {
               sessionId = existingDirectQuery.docs[0].id;
               attribution = 'existing_direct';
-              console.log(`Found existing direct conversation in ${website} collection`);
+              console.log(`Found existing direct conversation: ${conversationId}`);
 
-              await targetCollection.doc(sessionId).update({
+              await clicksCollection.doc(sessionId).update({
                 lastMessage: messageContent,
                 engagedAt: admin.firestore.FieldValue.serverTimestamp()
               });
             } else if (process.env.STORE_DIRECT_MESSAGES === 'true') {
               sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
               attribution = 'new_direct';
-              console.log(`Creating new direct record in ${website} collection`);
-
-              // Batch write example (if needed)
-              // const batch = db.batch();
-              // const docRef = targetCollection.doc();
-              // batch.set(docRef, { ...data });
-              // await batch.commit();
-
-              await targetCollection.doc(sessionId).set({
+              console.log(`Creating new direct record: ${sessionId}`);
+              
+              await clicksCollection.doc(sessionId).set({
                 ...utmData,
-                website,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 hasEngaged: true,
                 phoneNumber: normalizedPhone,
@@ -280,8 +250,9 @@ setImmediate(async () => {
             }
           }
         }
+        // End of Modified Direct Message Handling
 
-        // Update records with transaction safety
+        // Update existing records
         if (attribution !== 'new_direct' && sessionId !== 'not_stored') {
           const updateData = {
             hasEngaged: true,
@@ -289,7 +260,6 @@ setImmediate(async () => {
             engagedAt: admin.firestore.FieldValue.serverTimestamp(),
             syncedToSheets: false,
             attribution_source: attribution,
-            website,
             contactId,
             conversationId,
             ...(contactName && { contactName }),
@@ -297,7 +267,7 @@ setImmediate(async () => {
           };
 
           await db.runTransaction(async (transaction) => {
-            const docRef = targetCollection.doc(sessionId);
+            const docRef = clicksCollection.doc(sessionId);
             const doc = await transaction.get(docRef);
             
             if (doc.exists) {
@@ -305,23 +275,19 @@ setImmediate(async () => {
             } else {
               transaction.set(docRef, {
                 ...utmData,
-                website,
                 ...updateData,
                 timestamp: admin.firestore.FieldValue.serverTimestamp()
               });
             }
-          }).catch(transactionError => {
-            console.error('Transaction failed:', transactionError);
-            throw transactionError;
           });
         }
 
+        console.log(`Processed message from ${normalizedPhone} with attribution: ${attribution}`);
         res.status(200).json({ 
           status: 'processed',
           sessionId,
           source: utmData.source,
-          attribution,
-          website
+          attribution
         });
 
       } catch (err) {
@@ -333,25 +299,20 @@ setImmediate(async () => {
       }
     });
 
-    // Store-click endpoint with validation
     app.post('/store-click', async (req, res) => {
       try {
-        const { session_id, original_params, website, ...rawData } = req.body;
+        const { session_id, original_params, ...rawData } = req.body;
         
-        // Session ID validation
-        if (!session_id) {
-          return res.status(400).json({ error: 'Missing session_id' });
-        }
-
+        // Extract values with consistent naming
         const params = original_params || {};
         
+        // Create standardized structure
         const utmData = {
           source: params.source || rawData.source || 'facebook',
           medium: params.medium || rawData.medium || 'fb_ads',
           campaign: params.campaign || rawData.campaign || 'unknown',
           content: params.content || rawData.content || 'unknown',
           placement: params.placement || rawData.placement || 'unknown',
-          website: website || 'americanhairline',
           
           original_params: {
             ...params,
@@ -365,11 +326,8 @@ setImmediate(async () => {
           click_time: admin.firestore.FieldValue.serverTimestamp()
         };
 
-        const targetCollection = getCollectionForWebsite(utmData.website);
-        console.log(`Storing in ${targetCollection.path}`);
-
         await db.runTransaction(async (transaction) => {
-          const docRef = targetCollection.doc(session_id);
+          const docRef = clicksCollection.doc(session_id);
           const doc = await transaction.get(docRef);
           
           if (!doc.exists) {
@@ -380,15 +338,11 @@ setImmediate(async () => {
               syncedToSheets: false
             });
           }
-        }).catch(transactionError => {
-          console.error('Transaction failed:', transactionError);
-          throw transactionError;
         });
         
         res.status(201).json({ 
           message: 'Click stored',
-          session_id: session_id,
-          collection: targetCollection.id
+          session_id: session_id
         });
       } catch (err) {
         console.error('Storage error:', err);
