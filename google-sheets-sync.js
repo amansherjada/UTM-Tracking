@@ -1,15 +1,12 @@
-const { Firestore, FieldValue } = require('@google-cloud/firestore');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { GoogleAuth } = require('google-auth-library');
 const { sheets } = require('@googleapis/sheets');
 const fs = require('fs');
 require('dotenv').config();
 
-// Initialize Firestore
-const db = new Firestore({
-  projectId: process.env.GCP_PROJECT_ID,
-  databaseId: 'utm-tracker-db',
-  keyFilename: '/secrets/secrets'
-});
+// Initialize both Firestore databases
+const americanHairlineDb = getFirestore();
+const alchemaneDb = getFirestore('alchemane-utm-tracker-db');
 
 async function initializeSheetsClient() {
   try {
@@ -29,7 +26,12 @@ function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
     
-    // Improved timestamp handling
+    // Skip direct messages
+    if (data.source === 'direct_message') {
+      return null;
+    }
+    
+    // Process valid entries
     const timestamp = data.click_time?.toDate() || data.timestamp?.toDate() || new Date();
     const engagedTimestamp = data.engagedAt?.toDate()?.toISOString() || 'N/A';
     
@@ -52,7 +54,7 @@ function convertToSheetRows(docs) {
       (data.contactName || 'Anonymous').substring(0, 100),
       (data.lastMessage || 'No text').substring(0, 150).replace(/\n/g, ' ')
     ];
-  });
+  }).filter(row => row !== null); // Remove any null rows (direct messages)
 }
 
 async function ensureSheetExists(sheetsClient, spreadsheetId, sheetName) {
@@ -110,7 +112,7 @@ async function ensureSheetExists(sheetsClient, spreadsheetId, sheetName) {
   }
 }
 
-async function syncCollectionToSheet(collectionName, spreadsheetId) {
+async function syncDatabaseToSheet(db, collectionName, spreadsheetId) {
   const MAX_RETRIES = 3;
   let attempt = 0;
   const SHEET_NAME = 'Sheet1';
@@ -125,19 +127,28 @@ async function syncCollectionToSheet(collectionName, spreadsheetId) {
       const snapshot = await db.collection(collectionName)
         .where('hasEngaged', '==', true)
         .where('syncedToSheets', '==', false)
+        .where('source', '!=', 'direct_message')  // Skip direct messages
         .limit(250)
         .get();
 
       if (snapshot.empty) return { count: 0 };
 
       const rows = convertToSheetRows(snapshot.docs);
+      
+      if (rows.length === 0) {
+        console.log(`No valid records to sync from ${collectionName}`);
+        return { count: 0 };
+      }
+      
       const batch = db.batch();
       
       snapshot.docs.forEach(doc => {
-        batch.update(doc.ref, {
-          syncedToSheets: true,
-          lastSynced: FieldValue.serverTimestamp()
-        });
+        if (doc.data().source !== 'direct_message') {
+          batch.update(doc.ref, {
+            syncedToSheets: true,
+            lastSynced: FieldValue.serverTimestamp()
+          });
+        }
       });
 
       await sheetsClient.spreadsheets.values.append({
@@ -167,15 +178,17 @@ async function syncToSheets() {
 
   try {
     if (process.env.SHEETS_SPREADSHEET_ID) {
-      results.americanhairline = await syncCollectionToSheet(
+      results.americanhairline = await syncDatabaseToSheet(
+        americanHairlineDb,
         'utmClicks',
         process.env.SHEETS_SPREADSHEET_ID
       );
     }
 
     if (process.env.SHEETS_SPREADSHEET_ID_ALCHEMANE) {
-      results.alchemane = await syncCollectionToSheet(
-        'alchemaneutmClicks',
+      results.alchemane = await syncDatabaseToSheet(
+        alchemaneDb,
+        'utmClicks',
         process.env.SHEETS_SPREADSHEET_ID_ALCHEMANE
       );
     }
@@ -188,25 +201,28 @@ async function syncToSheets() {
 }
 
 async function setupRealtimeSync() {
-  const collections = [
+  const databases = [
     { 
+      db: americanHairlineDb,
       name: 'utmClicks',
       spreadsheetId: process.env.SHEETS_SPREADSHEET_ID 
     },
     { 
-      name: 'alchemaneutmClicks',
+      db: alchemaneDb,
+      name: 'utmClicks',
       spreadsheetId: process.env.SHEETS_SPREADSHEET_ID_ALCHEMANE 
     }
   ];
 
   const unsubscribeFunctions = [];
 
-  for (const { name, spreadsheetId } of collections) {
+  for (const { db, name, spreadsheetId } of databases) {
     if (!spreadsheetId) continue;
 
     const listener = db.collection(name)
       .where('hasEngaged', '==', true)
       .where('syncedToSheets', '==', false)
+      .where('source', '!=', 'direct_message')  // Skip direct messages
       .onSnapshot(async (snapshot) => {
         try {
           if (snapshot.empty) return;
@@ -215,6 +231,9 @@ async function setupRealtimeSync() {
           await ensureSheetExists(sheetsClient, spreadsheetId, 'Sheet1');
           
           const rows = convertToSheetRows(snapshot.docs);
+          
+          if (rows.length === 0) return;
+          
           const batch = db.batch();
 
           await sheetsClient.spreadsheets.values.append({
@@ -225,17 +244,19 @@ async function setupRealtimeSync() {
           });
 
           snapshot.docs.forEach(doc => {
-            batch.update(doc.ref, { 
-              syncedToSheets: true,
-              lastSynced: FieldValue.serverTimestamp()
-            });
+            if (doc.data().source !== 'direct_message') {
+              batch.update(doc.ref, { 
+                syncedToSheets: true,
+                lastSynced: FieldValue.serverTimestamp()
+              });
+            }
           });
 
           await batch.commit();
-          console.log(`Real-time sync: ${snapshot.size} docs to ${name}`);
+          console.log(`Real-time sync: ${rows.length} docs to ${db._databaseId || 'default'}`);
 
         } catch (error) {
-          console.error(`Real-time sync error (${name}):`, error.message);
+          console.error(`Real-time sync error (${db._databaseId || 'default'}):`, error.message);
         }
       });
 
