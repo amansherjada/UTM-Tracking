@@ -4,29 +4,23 @@ const { sheets } = require('@googleapis/sheets');
 const fs = require('fs');
 require('dotenv').config();
 
-// Initialize Firestore (using native GCP Firestore SDK)
+// Initialize Firestore
 const db = new Firestore({
   projectId: process.env.GCP_PROJECT_ID,
   databaseId: 'utm-tracker-db',
   keyFilename: '/secrets/secrets'
 });
 
-// Initialize Google Sheets API client
 async function initializeSheetsClient() {
   try {
     const credentials = JSON.parse(fs.readFileSync('/secrets/secrets', 'utf8'));
-
     const auth = new GoogleAuth({
-      scopes: [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive'
-      ],
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
       credentials
     });
-
     return sheets({ version: 'v4', auth: await auth.getClient() });
   } catch (error) {
-    console.error('🔥 Sheets client initialization failed:', error.message);
+    console.error('Sheets client initialization failed:', error.message);
     throw error;
   }
 }
@@ -34,32 +28,15 @@ async function initializeSheetsClient() {
 function convertToSheetRows(docs) {
   return docs.map(doc => {
     const data = doc.data();
-    console.log('Processing document ID:', doc.id);
-
-    // Extract timestamps with proper handling
-    let timestamp;
-    if (data.click_time && typeof data.click_time.toDate === 'function') {
-      timestamp = data.click_time.toDate();
-    } else if (data.timestamp && typeof data.timestamp.toDate === 'function') {
-      timestamp = data.timestamp.toDate();
-    } else {
-      timestamp = new Date();
-    }
-
-    // Extract engagement timestamp
-    let engagedTimestamp = 'N/A';
-    if (data.engagedAt) {
-      if (typeof data.engagedAt.toDate === 'function') {
-        engagedTimestamp = data.engagedAt.toDate().toISOString();
-      } else if (data.engagedAt instanceof Date) {
-        engagedTimestamp = data.engagedAt.toISOString();
-      }
-    }
-
-    // Extract parameters with explicit precedence
+    
+    // Improved timestamp handling
+    const timestamp = data.click_time?.toDate() || data.timestamp?.toDate() || new Date();
+    const engagedTimestamp = data.engagedAt?.toDate()?.toISOString() || 'N/A';
+    
+    // Safely handle potential undefined values
     const originalParams = data.original_params || {};
-
-    const rowValues = [
+    
+    return [
       timestamp.toISOString(),
       data.phoneNumber || 'N/A',
       originalParams.source || data.source || 'direct',
@@ -72,244 +49,204 @@ function convertToSheetRows(docs) {
       data.attribution_source || 'unknown',
       data.contactId || 'N/A',
       data.conversationId || 'N/A',
-      data.contactName || 'Anonymous',
-      data.lastMessage ? data.lastMessage.substring(0, 150).replace(/\n/g, ' ') : 'No text content'
+      (data.contactName || 'Anonymous').substring(0, 100),
+      (data.lastMessage || 'No text').substring(0, 150).replace(/\n/g, ' ')
     ];
-
-    return rowValues;
   });
 }
 
-async function syncToSheets() {
-  const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
-  const SHEET_NAME = 'Sheet1';
+async function ensureSheetExists(sheetsClient, spreadsheetId, sheetName) {
+  try {
+    const { data: spreadsheet } = await sheetsClient.spreadsheets.get({
+      spreadsheetId,
+      includeGridData: false
+    });
+
+    const sheetExists = spreadsheet.sheets.some(s => 
+      s.properties.title === sheetName
+    );
+
+    if (!sheetExists) {
+      await sheetsClient.spreadsheets.batchUpdate({
+        spreadsheetId,
+        resource: {
+          requests: [{
+            addSheet: {
+              properties: {
+                title: sheetName,
+                gridProperties: { rowCount: 1000, columnCount: 14 }
+              }
+            }
+          }]
+        }
+      });
+    }
+
+    // Verify headers
+    const requiredHeaders = [
+      'Timestamp', 'Phone Number', 'UTM Source', 'UTM Medium',
+      'UTM Campaign', 'UTM Content', 'Placement', 'Engaged',
+      'Engaged At', 'Attribution Source', 'Contact ID',
+      'Conversation ID', 'Contact Name', 'Last Message'
+    ];
+
+    const { data: headerData } = await sheetsClient.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A1:N1`
+    });
+
+    if (!headerData.values || !headerData.values[0]) {
+      await sheetsClient.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetName}!A1:N1`,
+        valueInputOption: 'RAW',
+        resource: { values: [requiredHeaders] }
+      });
+    }
+
+  } catch (error) {
+    console.error('Sheet setup failed:', error.message);
+    throw error;
+  }
+}
+
+async function syncCollectionToSheet(collectionName, spreadsheetId) {
   const MAX_RETRIES = 3;
   let attempt = 0;
-
-  console.log(`🔄 Starting sync (Attempt ${attempt + 1}/${MAX_RETRIES})`);
+  const SHEET_NAME = 'Sheet1';
 
   while (attempt < MAX_RETRIES) {
     try {
       const sheetsClient = await initializeSheetsClient();
+      
+      // Ensure sheet exists and has headers
+      await ensureSheetExists(sheetsClient, spreadsheetId, SHEET_NAME);
 
-      // 1. Get spreadsheet metadata and verify sheet exists
-      const { data: spreadsheet } = await sheetsClient.spreadsheets.get({
-        spreadsheetId: SPREADSHEET_ID,
-        includeGridData: false
-      });
-
-      console.log(`✅ Accessing spreadsheet: "${spreadsheet.properties.title}"`);
-
-      // 2. Check if sheet exists
-      const sheetExists = spreadsheet.sheets?.some(s => s.properties?.title === SHEET_NAME);
-
-      // 3. Create sheet if it doesn't exist
-      if (!sheetExists) {
-        console.log(`📄 Creating new sheet: ${SHEET_NAME}`);
-        await sheetsClient.spreadsheets.batchUpdate({
-          spreadsheetId: SPREADSHEET_ID,
-          resource: {
-            requests: [{
-              addSheet: {
-                properties: {
-                  title: SHEET_NAME,
-                  gridProperties: {
-                    rowCount: 1000,
-                    columnCount: 14
-                  }
-                }
-              }
-            }]
-          }
-        });
-      }
-
-      // 4. Now handle headers
-      const { data: sheetsData } = await sheetsClient.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A1:N1`
-      });
-
-      const requiredHeaders = [
-        'Timestamp', 'Phone Number', 'UTM Source', 'UTM Medium',
-        'UTM Campaign', 'UTM Content', 'Placement', 'Engaged',
-        'Engaged At', 'Attribution Source', 'Contact ID',
-        'Conversation ID', 'Contact Name', 'Last Message'
-      ];
-
-      if (!sheetsData.values || !sheetsData.values[0]) {
-        console.log('⏳ Setting up headers');
-        await sheetsClient.spreadsheets.values.update({
-          spreadsheetId: SPREADSHEET_ID,
-          range: `${SHEET_NAME}!A1:N1`,
-          valueInputOption: 'RAW',
-          resource: { values: [requiredHeaders] }
-        });
-      }
-
-      const snapshot = await db.collection('utmClicks')
+      const snapshot = await db.collection(collectionName)
         .where('hasEngaged', '==', true)
         .where('syncedToSheets', '==', false)
-        .where('source', '!=', 'direct_message')
         .limit(250)
         .get();
 
-      if (snapshot.empty) {
-        console.log('ℹ️ No new records to sync');
-        return { count: 0 };
-      }
+      if (snapshot.empty) return { count: 0 };
 
-      console.log(`🔍 Found ${snapshot.docs.length} documents to sync`);
       const rows = convertToSheetRows(snapshot.docs);
-
-      // 🔥 CRITICAL FIX: Use native Firestore FieldValue
-      const updatePromises = snapshot.docs.map(doc => {
-        return doc.ref.update({
+      const batch = db.batch();
+      
+      snapshot.docs.forEach(doc => {
+        batch.update(doc.ref, {
           syncedToSheets: true,
-          lastSynced: FieldValue.serverTimestamp() // Fixed line
+          lastSynced: FieldValue.serverTimestamp()
         });
       });
 
-      const appendResponse = await sheetsClient.spreadsheets.values.append({
-        spreadsheetId: SPREADSHEET_ID,
+      await sheetsClient.spreadsheets.values.append({
+        spreadsheetId,
         range: `${SHEET_NAME}!A:N`,
         valueInputOption: 'USER_ENTERED',
-        insertDataOption: 'INSERT_ROWS',
         resource: { values: rows }
       });
 
-      await Promise.all(updatePromises);
-
-      console.log('✅ Firestore documents updated');
-      console.log('📝 Sheets update:', appendResponse.data.updates.updatedRange);
-
-      return {
-        count: rows.length,
-        spreadsheetId: SPREADSHEET_ID,
-        sheetName: SHEET_NAME
-      };
+      await batch.commit();
+      return { count: rows.length };
 
     } catch (err) {
       attempt++;
-      console.error(`❌ Attempt ${attempt} failed:`, err.message);
-
-      if (attempt >= MAX_RETRIES) {
-        console.error('💥 Maximum retries exceeded');
-        throw new Error(`Final sync failure: ${err.message}`);
-      }
-
+      console.error(`Sync failed (attempt ${attempt}):`, err.message);
+      if (attempt >= MAX_RETRIES) throw err;
       await new Promise(resolve => setTimeout(resolve, attempt * 2000));
     }
   }
 }
 
-async function scheduledSync() {
-  const startTime = Date.now();
-  const result = {
-    success: false,
-    duration: 0,
-    syncedCount: 0
+async function syncToSheets() {
+  const results = {
+    americanhairline: { success: false },
+    alchemane: { success: false }
   };
 
   try {
-    const syncResult = await syncToSheets();
-    result.success = true;
-    result.syncedCount = syncResult.count;
-    result.duration = Date.now() - startTime;
-    result.spreadsheetId = syncResult.spreadsheetId;
-  } catch (err) {
-    result.error = err.message;
-    result.retryable = err.message.includes('quota') || err.code === 429;
-  } finally {
-    result.timestamp = new Date().toISOString();
-    console.log('⏱️ Sync result:', result);
-    return result;
+    if (process.env.SHEETS_SPREADSHEET_ID) {
+      results.americanhairline = await syncCollectionToSheet(
+        'utmClicks',
+        process.env.SHEETS_SPREADSHEET_ID
+      );
+    }
+
+    if (process.env.SHEETS_SPREADSHEET_ID_ALCHEMANE) {
+      results.alchemane = await syncCollectionToSheet(
+        'alchemaneutmClicks',
+        process.env.SHEETS_SPREADSHEET_ID_ALCHEMANE
+      );
+    }
+
+    return results;
+  } catch (error) {
+    console.error('Global sync error:', error);
+    return results;
   }
 }
 
-// In google-sheets-sync.js
-
 async function setupRealtimeSync() {
-    console.log('🔄 Setting up real-time Firestore to Sheets sync');
-    
-    try {
-      // Create a query for documents that need syncing
-      const query = db.collection('utmClicks')
-        .where('hasEngaged', '==', true)
-        .where('syncedToSheets', '==', false)
-        .where('source', '!=', 'direct_message');
-      
-      // Set up the listener with error handling
-      const unsubscribe = query.onSnapshot(async (snapshot) => {
+  const collections = [
+    { 
+      name: 'utmClicks',
+      spreadsheetId: process.env.SHEETS_SPREADSHEET_ID 
+    },
+    { 
+      name: 'alchemaneutmClicks',
+      spreadsheetId: process.env.SHEETS_SPREADSHEET_ID_ALCHEMANE 
+    }
+  ];
+
+  const unsubscribeFunctions = [];
+
+  for (const { name, spreadsheetId } of collections) {
+    if (!spreadsheetId) continue;
+
+    const listener = db.collection(name)
+      .where('hasEngaged', '==', true)
+      .where('syncedToSheets', '==', false)
+      .onSnapshot(async (snapshot) => {
         try {
-          // Skip empty snapshots
-          if (snapshot.empty) {
-            return;
-          }
+          if (snapshot.empty) return;
           
-          // Get the modified or added documents
-          const docsToSync = [];
-          snapshot.docChanges().forEach((change) => {
-            // Only process new or modified documents
-            if (change.type === 'added' || change.type === 'modified') {
-              docsToSync.push(change.doc);
-            }
-          });
-          
-          if (docsToSync.length === 0) {
-            return;
-          }
-          
-          console.log(`🔥 Real-time sync triggered for ${docsToSync.length} documents`);
-          
-          // Initialize the sheets client
           const sheetsClient = await initializeSheetsClient();
-          const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
-          const SHEET_NAME = 'Sheet1';
+          await ensureSheetExists(sheetsClient, spreadsheetId, 'Sheet1');
           
-          // Convert the documents to sheet rows
-          const rows = convertToSheetRows(docsToSync);
-          
-          // First mark these documents as synced to prevent duplicate syncs
-          // This is important in case the sheets API call fails
-          const updatePromises = docsToSync.map(doc => {
-            return doc.ref.update({
+          const rows = convertToSheetRows(snapshot.docs);
+          const batch = db.batch();
+
+          await sheetsClient.spreadsheets.values.append({
+            spreadsheetId,
+            range: 'Sheet1!A:N',
+            valueInputOption: 'USER_ENTERED',
+            resource: { values: rows }
+          });
+
+          snapshot.docs.forEach(doc => {
+            batch.update(doc.ref, { 
               syncedToSheets: true,
               lastSynced: FieldValue.serverTimestamp()
             });
           });
-          
-          // Wait for all updates to complete
-          await Promise.all(updatePromises);
-          
-          // Now append the data to Google Sheets
-          const appendResponse = await sheetsClient.spreadsheets.values.append({
-            spreadsheetId: SPREADSHEET_ID,
-            range: `${SHEET_NAME}!A:N`,
-            valueInputOption: 'USER_ENTERED',
-            insertDataOption: 'INSERT_ROWS',
-            resource: { values: rows }
-          });
-          
-          console.log('✅ Real-time sync completed');
-          console.log('📝 Sheets update:', appendResponse.data.updates.updatedRange);
-          
-        } catch (err) {
-          console.error('❌ Real-time sync error:', err);
+
+          await batch.commit();
+          console.log(`Real-time sync: ${snapshot.size} docs to ${name}`);
+
+        } catch (error) {
+          console.error(`Real-time sync error (${name}):`, error.message);
         }
-      }, (error) => {
-        console.error('🚨 Listener error:', error);
-        // Attempt to recreate the listener after a delay
-        setTimeout(() => setupRealtimeSync(), 60000);
       });
-      
-      // Return the unsubscribe function to allow cleanup if needed
-      return unsubscribe;
-    } catch (err) {
-      console.error('💥 Failed to set up real-time sync:', err);
-      // Attempt to recreate the listener after a delay
-      setTimeout(() => setupRealtimeSync(), 60000);
-    }
+
+    unsubscribeFunctions.push(listener);
   }
 
-module.exports = { syncToSheets, scheduledSync, setupRealtimeSync  };
+  return () => unsubscribeFunctions.forEach(fn => fn());
+}
+
+module.exports = { 
+  syncToSheets, 
+  scheduledSync: syncToSheets,
+  setupRealtimeSync 
+};
