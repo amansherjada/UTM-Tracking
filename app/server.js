@@ -318,7 +318,7 @@ setImmediate(async () => {
       }
     });
 
-    // Updated store-click endpoint with multi-database support
+    // Updated store-click endpoint with multi-database support and fixed timestamp handling
     app.post('/store-click', async (req, res) => {
       try {
         const { session_id, website, original_params, ...rawData } = req.body;
@@ -332,14 +332,13 @@ setImmediate(async () => {
         // Extract values with consistent naming
         const params = original_params || {};
         
-        // Create standardized structure
+        // Create standardized structure without timestamp
         const utmData = {
           source: params.source || rawData.source || 'facebook',
           medium: params.medium || rawData.medium || 'fb_ads',
           campaign: params.campaign || rawData.campaign || 'unknown',
           content: params.content || rawData.content || 'unknown',
           placement: params.placement || rawData.placement || 'unknown',
-          
           original_params: {
             ...params,
             campaign: params.campaign || rawData.campaign || 'unknown',
@@ -347,9 +346,7 @@ setImmediate(async () => {
             source: params.source || rawData.source || 'facebook',
             content: params.content || rawData.content || 'unknown',
             placement: params.placement || rawData.placement || 'unknown'
-          },
-          
-          click_time: admin.firestore.FieldValue.serverTimestamp()
+          }
         };
 
         await db.runTransaction(async (transaction) => {
@@ -357,12 +354,19 @@ setImmediate(async () => {
           const doc = await transaction.get(docRef);
           
           if (!doc.exists) {
-            transaction.set(docRef, {
+            // Create base document without timestamp first
+            const baseData = {
               ...utmData,
               timestamp: admin.firestore.FieldValue.serverTimestamp(),
               hasEngaged: false,
               syncedToSheets: false
-            });
+            };
+            
+            // Remove any existing click_time field to avoid double serialization
+            delete baseData.click_time;
+            
+            // Set the document with the base data
+            transaction.set(docRef, baseData);
           }
         });
         
