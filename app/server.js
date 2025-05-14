@@ -354,19 +354,24 @@ setImmediate(async () => {
           const doc = await transaction.get(docRef);
           
           if (!doc.exists) {
-            // Create base document without timestamp first
+            // Create base document without problematic timestamp
             const baseData = {
               ...utmData,
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
               hasEngaged: false,
               syncedToSheets: false
             };
             
-            // Remove any existing click_time field to avoid double serialization
+            // Remove any existing timestamp fields
+            delete baseData.timestamp;
             delete baseData.click_time;
             
-            // Set the document with the base data
+            // Set the document first
             transaction.set(docRef, baseData);
+            
+            // Then update with the timestamp separately
+            transaction.update(docRef, {
+              timestamp: admin.firestore.Timestamp.now()
+            });
           }
         });
         
