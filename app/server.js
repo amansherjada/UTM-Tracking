@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const admin = require('firebase-admin');
-const { getFirestore } = require('firebase-admin/firestore');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
 const crypto = require('crypto');
 const fs = require('fs/promises');
@@ -54,27 +53,24 @@ setImmediate(async () => {
     const credsPath = '/secrets/secrets';
     const serviceAccount = JSON.parse(await fs.readFile(credsPath));
     
-    // Initialize Firebase with a single app
+    // Initialize Firebase
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
       databaseURL: `https://${process.env.GCP_PROJECT_ID}.firebaseio.com`,
     });
 
-    // Initialize the default database (American Hairline)
-    const americanHairlineDb = getFirestore();
-    americanHairlineDb.settings({ timeout: 10000 });
+    const db = admin.firestore();
+    db.settings({ 
+      databaseId: 'utm-tracker-db',
+      timeout: 10000,
+    });
 
-    // Initialize the Alchemane database
-    const alchemaneDb = getFirestore('alchemane-utm-tracker-db');
-    alchemaneDb.settings({ timeout: 10000 });
-    
-    // Verify both Firestore connections
+    // Verify Firestore connection
     let firestoreConnected = false;
     const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        await americanHairlineDb.listCollections();
-        await alchemaneDb.listCollections();
+        await db.listCollections();
         firestoreConnected = true;
         break;
       } catch (err) {
@@ -87,19 +83,8 @@ setImmediate(async () => {
       throw new Error('Failed to connect to Firestore');
     }
 
-    // Define collections in each database
-    const americanHairlineCollection = americanHairlineDb.collection('utmClicks');
-    const alchemaneCollection = alchemaneDb.collection('utmClicks');
-    console.log('Firestore databases connected successfully');
-
-    // Database/collection selector function
-    function getDatabaseForWebsite(website) {
-      return website === 'alchemane' ? alchemaneDb : americanHairlineDb;
-    }
-    
-    function getCollectionForWebsite(website) {
-      return website === 'alchemane' ? alchemaneCollection : americanHairlineCollection;
-    }
+    const clicksCollection = db.collection('utmClicks');
+    console.log('Firestore connected successfully');
 
     // Secret management
     const secretCache = new Map();
@@ -159,7 +144,6 @@ setImmediate(async () => {
           content: 'none'
         };
         let attribution = 'direct';
-        let website = 'americanhairline'; // Default website
         
         // Matching Priority 1: Context Parameter
         if (event.context) {
@@ -169,36 +153,22 @@ setImmediate(async () => {
               sessionId = context.session_id;
               utmData = context;
               attribution = 'context';
-              website = context.website || 'americanhairline';
-              console.log(`Context match: ${sessionId}, Website: ${website}`);
+              console.log(`Context match: ${sessionId}`);
             }
           } catch (err) {
             console.warn('Invalid context format:', err);
           }
         }
 
-        // Skip direct messages as requested
-        if (utmData.source === 'direct_message') {
-          console.log(`Skipping direct message from ${normalizedPhone}`);
-          return res.status(200).json({
-            status: 'skipped_direct_message',
-            website
-          });
-        }
-
-        // Get collection based on website
-        const targetCollection = getCollectionForWebsite(website);
-        console.log(`Using database: ${website}`);
-
         // Matching Priority 2: Gallabox Identifiers
         if (!sessionId && (contactId || conversationId)) {
-          console.log(`Attempting Gallabox ID match for ${website}`);
+          console.log(`Attempting Gallabox ID match - Contact: ${contactId}, Conversation: ${conversationId}`);
           
           const fiveMinutesAgo = admin.firestore.Timestamp.fromDate(
             new Date(Date.now() - 5 * 60 * 1000)
           );
 
-          const query = targetCollection
+          const query = clicksCollection
             .where('hasEngaged', '==', false)
             .where('timestamp', '>=', fiveMinutesAgo)
             .orderBy('timestamp', 'desc')
@@ -210,9 +180,10 @@ setImmediate(async () => {
             sessionId = snapshot.docs[0].id;
             utmData = snapshot.docs[0].data();
             attribution = 'gallabox_id_match';
-            console.log(`Matched with recent click in ${website} database: ${sessionId}`);
+            console.log(`Matched with recent click: ${sessionId}`);
 
-            await targetCollection.doc(sessionId).update({
+            // Update click record with Gallabox IDs
+            await clicksCollection.doc(sessionId).update({
               contactId,
               conversationId,
               contactName: contactName || null
@@ -222,7 +193,7 @@ setImmediate(async () => {
 
         // Matching Priority 3: Phone Number (if available in click records)
         if (!sessionId) {
-          const phoneMatch = await targetCollection
+          const phoneMatch = await clicksCollection
             .where('phoneNumber', '==', normalizedPhone)
             .where('hasEngaged', '==', false)
             .orderBy('timestamp', 'desc')
@@ -233,57 +204,90 @@ setImmediate(async () => {
             sessionId = phoneMatch.docs[0].id;
             utmData = phoneMatch.docs[0].data();
             attribution = 'phone_match';
-            console.log(`Phone number match in ${website} database: ${sessionId}`);
+            console.log(`Phone number match: ${sessionId}`);
           }
         }
 
+        // Start of Modified Direct Message Handling
+        if (!sessionId) {
+          if (conversationId) {
+            const existingDirectQuery = await clicksCollection
+              .where('conversationId', '==', conversationId)
+              .where('source', '==', 'direct_message')
+              .limit(1)
+              .get();
+
+            if (!existingDirectQuery.empty) {
+              sessionId = existingDirectQuery.docs[0].id;
+              attribution = 'existing_direct';
+              console.log(`Found existing direct conversation: ${conversationId}`);
+
+              await clicksCollection.doc(sessionId).update({
+                lastMessage: messageContent,
+                engagedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+            } else if (process.env.STORE_DIRECT_MESSAGES === 'true') {
+              sessionId = `direct-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+              attribution = 'new_direct';
+              console.log(`Creating new direct record: ${sessionId}`);
+              
+              await clicksCollection.doc(sessionId).set({
+                ...utmData,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                hasEngaged: true,
+                phoneNumber: normalizedPhone,
+                lastMessage: messageContent,
+                engagedAt: admin.firestore.FieldValue.serverTimestamp(),
+                syncedToSheets: false,
+                contactId,
+                conversationId,
+                contactName
+              });
+            } else {
+              console.log(`Skipping direct message from ${normalizedPhone}`);
+              attribution = 'ignored_direct';
+              sessionId = 'not_stored';
+            }
+          }
+        }
+        // End of Modified Direct Message Handling
+
         // Update existing records
-        if (sessionId) {
+        if (attribution !== 'new_direct' && sessionId !== 'not_stored') {
           const updateData = {
             hasEngaged: true,
             phoneNumber: normalizedPhone,
             engagedAt: admin.firestore.FieldValue.serverTimestamp(),
             syncedToSheets: false,
             attribution_source: attribution,
-            website,
             contactId,
             conversationId,
             ...(contactName && { contactName }),
             ...(messageContent && { lastMessage: messageContent })
           };
 
-          try {
-            await getDatabaseForWebsite(website).runTransaction(async (transaction) => {
-              const docRef = targetCollection.doc(sessionId);
-              const doc = await transaction.get(docRef);
-              
-              if (doc.exists) {
-                transaction.update(docRef, updateData);
-              } else {
-                transaction.set(docRef, {
-                  ...utmData,
-                  website,
-                  ...updateData,
-                  timestamp: admin.firestore.FieldValue.serverTimestamp()
-                });
-              }
-            });
-          } catch (transactionError) {
-            console.error('Transaction failed:', transactionError);
-            throw transactionError;
-          }
-        } else {
-          console.log(`No matching session found for ${normalizedPhone}`);
-          sessionId = 'not_matched';
+          await db.runTransaction(async (transaction) => {
+            const docRef = clicksCollection.doc(sessionId);
+            const doc = await transaction.get(docRef);
+            
+            if (doc.exists) {
+              transaction.update(docRef, updateData);
+            } else {
+              transaction.set(docRef, {
+                ...utmData,
+                ...updateData,
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
+              });
+            }
+          });
         }
 
-        console.log(`Processed message from ${normalizedPhone} with attribution: ${attribution} for website: ${website}`);
+        console.log(`Processed message from ${normalizedPhone} with attribution: ${attribution}`);
         res.status(200).json({ 
           status: 'processed',
           sessionId,
           source: utmData.source,
-          attribution,
-          website
+          attribution
         });
 
       } catch (err) {
@@ -295,23 +299,9 @@ setImmediate(async () => {
       }
     });
 
-    // Store-click endpoint with website param handling
     app.post('/store-click', async (req, res) => {
       try {
-        const { session_id, original_params, website, ...rawData } = req.body;
-        
-        // Session ID validation
-        if (!session_id) {
-          return res.status(400).json({ error: 'Missing session_id' });
-        }
-
-        // Skip direct messages as requested
-        if (rawData.source === 'direct_message') {
-          return res.status(200).json({
-            status: 'skipped_direct_message',
-            session_id
-          });
-        }
+        const { session_id, original_params, ...rawData } = req.body;
         
         // Extract values with consistent naming
         const params = original_params || {};
@@ -323,7 +313,6 @@ setImmediate(async () => {
           campaign: params.campaign || rawData.campaign || 'unknown',
           content: params.content || rawData.content || 'unknown',
           placement: params.placement || rawData.placement || 'unknown',
-          website: website || 'americanhairline', // Default to americanhairline
           
           original_params: {
             ...params,
@@ -337,35 +326,23 @@ setImmediate(async () => {
           click_time: admin.firestore.FieldValue.serverTimestamp()
         };
 
-        // Select appropriate database and collection based on website
-        const targetDb = getDatabaseForWebsite(utmData.website);
-        const targetCollection = getCollectionForWebsite(utmData.website);
-        console.log(`Storing click in ${utmData.website} database`);
-
-        try {
-          await targetDb.runTransaction(async (transaction) => {
-            const docRef = targetCollection.doc(session_id);
-            const doc = await transaction.get(docRef);
-            
-            if (!doc.exists) {
-              transaction.set(docRef, {
-                ...utmData,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                hasEngaged: false,
-                syncedToSheets: false
-              });
-            }
-          });
-        } catch (transactionError) {
-          console.error('Transaction failed:', transactionError);
-          throw transactionError;
-        }
+        await db.runTransaction(async (transaction) => {
+          const docRef = clicksCollection.doc(session_id);
+          const doc = await transaction.get(docRef);
+          
+          if (!doc.exists) {
+            transaction.set(docRef, {
+              ...utmData,
+              timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              hasEngaged: false,
+              syncedToSheets: false
+            });
+          }
+        });
         
         res.status(201).json({ 
           message: 'Click stored',
-          session_id: session_id,
-          website: utmData.website,
-          database: utmData.website === 'alchemane' ? 'alchemane-utm-tracker-db' : 'default'
+          session_id: session_id
         });
       } catch (err) {
         console.error('Storage error:', err);
@@ -376,12 +353,8 @@ setImmediate(async () => {
     // Readiness endpoint
     app.get('/readiness', async (req, res) => {
       try {
-        await americanHairlineDb.listCollections();
-        await alchemaneDb.listCollections();
-        res.status(200).json({ 
-          status: 'ready',
-          databases: ['default', 'alchemane-utm-tracker-db']
-        });
+        await db.listCollections();
+        res.status(200).json({ status: 'ready' });
       } catch (err) {
         res.status(500).json({ error: 'Not ready' });
       }
