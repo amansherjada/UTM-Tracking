@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const admin = require('firebase-admin');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+const { Firestore } = require('@google-cloud/firestore');
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const secretClient = new SecretManagerServiceClient();
@@ -59,18 +60,37 @@ setImmediate(async () => {
       databaseURL: `https://${process.env.GCP_PROJECT_ID}.firebaseio.com`,
     });
 
-    const db = admin.firestore();
-    db.settings({ 
+    // Database factory setup
+    const databases = {
+      default: admin.firestore(),
+      alchemane: new Firestore({
+        projectId: process.env.GCP_PROJECT_ID,
+        databaseId: 'alchemane-utm-tracker-db',
+        keyFilename: '/secrets/secrets'
+      })
+    };
+
+    databases.default.settings({ 
       databaseId: 'utm-tracker-db',
       timeout: 10000,
     });
 
-    // Verify Firestore connection
+    function getDatabase(website) {
+      if (website === 'alchemane') {
+        console.log('Using alchemane database');
+        return databases.alchemane;
+      }
+      console.log('Using default database');
+      return databases.default;
+    }
+
+    // Verify Firestore connections
     let firestoreConnected = false;
     const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        await db.listCollections();
+        await databases.default.listCollections();
+        await databases.alchemane.listCollections();
         firestoreConnected = true;
         break;
       } catch (err) {
@@ -83,7 +103,6 @@ setImmediate(async () => {
       throw new Error('Failed to connect to Firestore');
     }
 
-    const clicksCollection = db.collection('utmClicks');
     console.log('Firestore connected successfully');
 
     // Secret management
@@ -168,7 +187,7 @@ setImmediate(async () => {
             new Date(Date.now() - 5 * 60 * 1000)
           );
 
-          const query = clicksCollection
+          const query = databases.default.collection('utmClicks')
             .where('hasEngaged', '==', false)
             .where('timestamp', '>=', fiveMinutesAgo)
             .orderBy('timestamp', 'desc')
@@ -183,7 +202,7 @@ setImmediate(async () => {
             console.log(`Matched with recent click: ${sessionId}`);
 
             // Update click record with Gallabox IDs
-            await clicksCollection.doc(sessionId).update({
+            await databases.default.collection('utmClicks').doc(sessionId).update({
               contactId,
               conversationId,
               contactName: contactName || null
@@ -193,7 +212,7 @@ setImmediate(async () => {
 
         // Matching Priority 3: Phone Number (if available in click records)
         if (!sessionId) {
-          const phoneMatch = await clicksCollection
+          const phoneMatch = await databases.default.collection('utmClicks')
             .where('phoneNumber', '==', normalizedPhone)
             .where('hasEngaged', '==', false)
             .orderBy('timestamp', 'desc')
@@ -211,7 +230,7 @@ setImmediate(async () => {
         // Start of Modified Direct Message Handling
         if (!sessionId) {
           if (conversationId) {
-            const existingDirectQuery = await clicksCollection
+            const existingDirectQuery = await databases.default.collection('utmClicks')
               .where('conversationId', '==', conversationId)
               .where('source', '==', 'direct_message')
               .limit(1)
@@ -222,7 +241,7 @@ setImmediate(async () => {
               attribution = 'existing_direct';
               console.log(`Found existing direct conversation: ${conversationId}`);
 
-              await clicksCollection.doc(sessionId).update({
+              await databases.default.collection('utmClicks').doc(sessionId).update({
                 lastMessage: messageContent,
                 engagedAt: admin.firestore.FieldValue.serverTimestamp()
               });
@@ -231,7 +250,7 @@ setImmediate(async () => {
               attribution = 'new_direct';
               console.log(`Creating new direct record: ${sessionId}`);
               
-              await clicksCollection.doc(sessionId).set({
+              await databases.default.collection('utmClicks').doc(sessionId).set({
                 ...utmData,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 hasEngaged: true,
@@ -266,8 +285,8 @@ setImmediate(async () => {
             ...(messageContent && { lastMessage: messageContent })
           };
 
-          await db.runTransaction(async (transaction) => {
-            const docRef = clicksCollection.doc(sessionId);
+          await databases.default.runTransaction(async (transaction) => {
+            const docRef = databases.default.collection('utmClicks').doc(sessionId);
             const doc = await transaction.get(docRef);
             
             if (doc.exists) {
@@ -299,9 +318,16 @@ setImmediate(async () => {
       }
     });
 
+    // Updated store-click endpoint with multi-database support
     app.post('/store-click', async (req, res) => {
       try {
-        const { session_id, original_params, ...rawData } = req.body;
+        const { session_id, website, original_params, ...rawData } = req.body;
+        
+        console.log(`Processing click from ${website || 'unknown'} website`);
+        
+        // Select the appropriate database
+        const db = getDatabase(website);
+        const clicksCollection = db.collection('utmClicks');
         
         // Extract values with consistent naming
         const params = original_params || {};
@@ -353,7 +379,8 @@ setImmediate(async () => {
     // Readiness endpoint
     app.get('/readiness', async (req, res) => {
       try {
-        await db.listCollections();
+        await databases.default.listCollections();
+        await databases.alchemane.listCollections();
         res.status(200).json({ status: 'ready' });
       } catch (err) {
         res.status(500).json({ error: 'Not ready' });
