@@ -119,17 +119,19 @@ setImmediate(async () => {
         console.log('Incoming webhook payload:', JSON.stringify(event, null, 2));
 
         // Check if this is for the American Hairline number
-        const receivingNumber = event.request?.data?.channelNumber || '';
-        if (receivingNumber !== '919137279145') {
-        console.log(`Skipping: Message was for ${receivingNumber}, not American Hairline`);
-        return res.status(200).json({ status: 'skipped', reason: 'wrong_number' });
+        const receivingNumber = (event.channelNumber || '').replace(/\D/g, '');
+        const americanHairlineNumber = '919137279145';
+        console.log('DEBUG: channelNumber received:', receivingNumber);
+        if (receivingNumber !== americanHairlineNumber) {
+          console.log(`Skipping: Message was for ${receivingNumber}, not American Hairline`);
+          return res.status(200).json({ status: 'skipped', reason: 'wrong_number' });
         }
         // Extract critical identifiers
-        const senderPhone = event.request?.data?.whatsapp?.from?.replace(/^0+/, '') || '';
-        const contactId = event.request?.data?.contactId || event.request?.data?.contact?.id || null;
-        const conversationId = event.request?.data?.conversationId || null;
-        const contactName = event.request?.data?.contact?.name || null;
-        const messageContent = event.request?.data?.whatsapp?.text?.body || 'No text content';
+        const senderPhone = event.whatsapp?.from?.replace(/^0+/, '') || '';
+        const contactId = event.contactId || event.contact?.id || null;
+        const conversationId = event.conversationId || null;
+        const contactName = event.contact?.name || null;
+        const messageContent = event.whatsapp?.text?.body || (event.whatsapp?.interactive?.list_reply?.title || 'No text content');
         
         // Phone number normalization
         let normalizedPhone = senderPhone;
