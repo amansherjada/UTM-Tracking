@@ -62,11 +62,16 @@ function convertToSheetRows(docs) {
     const rowValues = [
       timestamp.toISOString(),
       data.phoneNumber || 'N/A',
-      originalParams.source || data.source || 'direct',
-      originalParams.medium || data.medium || 'organic',
-      originalParams.campaign || data.campaign || 'none',
-      originalParams.content || data.content || 'none',
-      originalParams.placement || data.placement || 'N/A',
+      // UTM Source
+      originalParams.CampaignSource || originalParams['Campaign Source'] || originalParams.source || data.source || 'direct',
+      // UTM Medium
+      originalParams.AdSetName || originalParams['Ad Set Name'] || originalParams.medium || data.medium || 'organic',
+      // UTM Campaign
+      originalParams.CampaignName || originalParams['Campaign Name'] || originalParams.campaign || data.campaign || 'none',
+      // UTM Content
+      originalParams.AdName || originalParams['Ad Name'] || originalParams.content || data.content || 'none',
+      // Placement
+      originalParams.Placement || originalParams.placement || data.placement || 'N/A',
       data.hasEngaged ? '✅ YES' : '❌ NO',
       engagedTimestamp,
       data.attribution_source || 'unknown',
