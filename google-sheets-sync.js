@@ -63,13 +63,13 @@ function convertToSheetRows(docs) {
       timestamp.toISOString(),
       data.phoneNumber || 'N/A',
       // UTM Source
-      originalParams.CampaignSource || originalParams['Campaign Source'] || originalParams.source || data.source || 'direct',
+      originalParams.CampaignSource || originalParams['Campaign Source'] || originalParams['Campaign_Source'] || originalParams.source || data.source || 'direct',
       // UTM Medium
-      originalParams.AdSetName || originalParams['Ad Set Name'] || originalParams.medium || data.medium || 'organic',
+      originalParams.AdSetName || originalParams['Ad Set Name'] || originalParams['Ad_Set_Name'] || originalParams.medium || data.medium || 'organic',
       // UTM Campaign
-      originalParams.CampaignName || originalParams['Campaign Name'] || originalParams.campaign || data.campaign || 'none',
+      originalParams.CampaignName || originalParams['Campaign Name'] || originalParams['Campaign_Name'] || originalParams.campaign || data.campaign || 'none',
       // UTM Content
-      originalParams.AdName || originalParams['Ad Name'] || originalParams.content || data.content || 'none',
+      originalParams.AdName || originalParams['Ad Name'] || originalParams['Ad_Name'] || originalParams.content || data.content || 'none',
       // Placement
       originalParams.Placement || originalParams.placement || data.placement || 'N/A',
       data.hasEngaged ? '✅ YES' : '❌ NO',
